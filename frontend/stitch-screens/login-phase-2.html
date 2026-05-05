@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Login - Clip AI</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&amp;family=JetBrains+Mono:wght@500;600&amp;family=Syne:wght@700;800&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "primary-fixed": "#dbe1ff",
+                      "primary-container": "#2563eb",
+                      "surface-container-high": "#e7e7f3",
+                      "on-error": "#ffffff",
+                      "inverse-surface": "#2e3039",
+                      "inverse-on-surface": "#f0f0fb",
+                      "error": "#ba1a1a",
+                      "surface-variant": "#e1e2ed",
+                      "error-container": "#ffdad6",
+                      "secondary-fixed-dim": "#d2bbff",
+                      "secondary-fixed": "#eaddff",
+                      "on-surface-variant": "#434655",
+                      "on-surface": "#191b23",
+                      "on-primary": "#ffffff",
+                      "tertiary-container": "#bc4800",
+                      "background": "#faf8ff",
+                      "tertiary-fixed-dim": "#ffb596",
+                      "primary-fixed-dim": "#b4c5ff",
+                      "outline-variant": "#c3c6d7",
+                      "surface-container-low": "#f3f3fe",
+                      "on-tertiary-fixed": "#360f00",
+                      "inverse-primary": "#b4c5ff",
+                      "on-tertiary-fixed-variant": "#7d2d00",
+                      "surface-bright": "#faf8ff",
+                      "on-tertiary": "#ffffff",
+                      "on-secondary-fixed": "#25005a",
+                      "surface-container": "#ededf9",
+                      "on-primary-container": "#eeefff",
+                      "secondary-container": "#8a4cfc",
+                      "surface-container-highest": "#e1e2ed",
+                      "on-primary-fixed-variant": "#003ea8",
+                      "on-secondary-fixed-variant": "#5a00c6",
+                      "on-secondary-container": "#fffbff",
+                      "on-error-container": "#93000a",
+                      "secondary": "#712ae2",
+                      "surface-container-lowest": "#ffffff",
+                      "surface": "#faf8ff",
+                      "primary": "#004ac6",
+                      "on-background": "#191b23",
+                      "tertiary-fixed": "#ffdbcd",
+                      "on-tertiary-container": "#ffede6",
+                      "outline": "#737686",
+                      "surface-dim": "#d9d9e5",
+                      "on-primary-fixed": "#00174b",
+                      "tertiary": "#943700",
+                      "on-secondary": "#ffffff",
+                      "surface-tint": "#0053db"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.25rem",
+                      "lg": "0.5rem",
+                      "xl": "0.75rem",
+                      "full": "9999px"
+              },
+              "spacing": {
+                      "base": "4px",
+                      "panel-gutter": "1px",
+                      "xl": "32px",
+                      "inspector-width": "320px",
+                      "xs": "4px",
+                      "sm": "8px",
+                      "md": "16px",
+                      "sidebar-width": "280px",
+                      "lg": "24px"
+              },
+              "fontFamily": {
+                      "body-sm": [
+                              "DM Sans"
+                      ],
+                      "technical-mono": [
+                              "JetBrains Mono"
+                      ],
+                      "h1-bold": [
+                              "Syne"
+                      ],
+                      "timecode-lg": [
+                              "JetBrains Mono"
+                      ],
+                      "body-md": [
+                              "DM Sans"
+                      ],
+                      "display-pro": [
+                              "Syne"
+                      ]
+              },
+              "fontSize": {
+                      "body-sm": [
+                              "13px",
+                              {
+                                      "lineHeight": "1.4",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "technical-mono": [
+                              "12px",
+                              {
+                                      "lineHeight": "1",
+                                      "letterSpacing": "0.05em",
+                                      "fontWeight": "500"
+                              }
+                      ],
+                      "h1-bold": [
+                              "24px",
+                              {
+                                      "lineHeight": "1.2",
+                                      "fontWeight": "700"
+                              }
+                      ],
+                      "timecode-lg": [
+                              "18px",
+                              {
+                                      "lineHeight": "1",
+                                      "fontWeight": "600"
+                              }
+                      ],
+                      "body-md": [
+                              "14px",
+                              {
+                                      "lineHeight": "1.5",
+                                      "fontWeight": "400"
+                              }
+                      ],
+                      "display-pro": [
+                              "48px",
+                              {
+                                      "lineHeight": "1.1",
+                                      "letterSpacing": "-0.02em",
+                                      "fontWeight": "800"
+                              }
+                      ]
+              }
+            },
+          }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .material-symbols-outlined.fill {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+</head>
+<body class="bg-background min-h-screen flex items-center justify-center relative overflow-hidden text-on-background">
+<!-- Simulated Particle Field Background -->
+<div class="absolute inset-0 z-0 bg-[url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&amp;w=2564&amp;auto=format&amp;fit=crop')] bg-cover bg-center opacity-10" data-alt="A highly detailed generative digital art piece representing a particle field. Thousands of tiny, glowing electric blue and violet points of light float against a deep, pure white background. The composition is minimal, abstract, and evokes a sense of high-performance computing and modern AI technology. Soft, high-key lighting creates a serene, premium atmosphere."></div>
+<!-- Login Card Container -->
+<main class="relative z-10 w-[420px] bg-surface-container-lowest p-[48px] border border-outline-variant rounded-xl shadow-[0_30px_60px_-15px_rgba(0,0,0,0.1),0_10px_10px_-5px_rgba(0,0,0,0.04)] animate-[fade-in-up_0.4s_cubic-bezier(0.16,1,0.3,1)_forwards]">
+<!-- Branding Header -->
+<div class="flex flex-col items-center mb-8">
+<div class="flex items-center gap-2 mb-2">
+<div class="w-1 h-6 bg-primary-container"></div>
+<h1 class="font-display-pro text-display-pro text-on-surface m-0 tracking-tighter">
+                    CLIP<span class="text-primary-container">AI</span>
+</h1>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant text-center m-0">Professional video editing, simplified.</p>
+</div>
+<!-- Login Form -->
+<form class="space-y-6">
+<div class="space-y-1">
+<label class="font-technical-mono text-technical-mono text-on-surface-variant uppercase" for="email">Email</label>
+<input class="w-full h-11 px-3 border border-outline-variant rounded-lg font-body-md text-body-md bg-transparent focus:outline-none focus:border-primary-container focus:ring-2 focus:ring-primary-container/20 transition-all text-on-surface" id="email" placeholder="name@company.com" type="email"/>
+</div>
+<div class="space-y-1 relative">
+<label class="font-technical-mono text-technical-mono text-on-surface-variant uppercase flex justify-between" for="password">
+                    Password
+                    <a class="text-primary-container hover:underline lowercase normal-case" href="#">Forgot?</a>
+</label>
+<div class="relative">
+<input class="w-full h-11 px-3 pr-10 border border-outline-variant rounded-lg font-body-md text-body-md bg-transparent focus:outline-none focus:border-primary-container focus:ring-2 focus:ring-primary-container/20 transition-all text-on-surface" id="password" placeholder="••••••••" type="password"/>
+<button class="absolute inset-y-0 right-0 px-3 flex items-center text-outline hover:text-on-surface transition-colors" type="button">
+<span class="material-symbols-outlined text-[20px]" data-icon="visibility">visibility</span>
+</button>
+</div>
+</div>
+<button class="w-full h-11 bg-primary-container text-on-primary font-body-md text-body-md rounded-lg flex items-center justify-center gap-2 hover:bg-primary-fixed-variant hover:-translate-y-[1px] hover:shadow-md transition-all duration-150 group" type="submit">
+<!-- Normal State -->
+<span class="font-medium group-active:scale-95 transition-transform">Sign In</span>
+<!-- Loading State (hidden by default) -->
+<!-- 
+                <span class="material-symbols-outlined animate-spin text-[18px]">progress_activity</span>
+                <span class="font-medium">Signing in...</span> 
+                -->
+</button>
+</form>
+<!-- Footer -->
+<div class="mt-8 text-center">
+<p class="font-body-sm text-body-sm text-on-surface-variant m-0">
+                Don't have an account? 
+                <a class="text-primary-container font-medium hover:underline" href="#">Register</a>
+</p>
+</div>
+</main>
+<style>
+        @keyframes fade-in-up {
+            0% {
+                opacity: 0;
+                transform: translateY(24px) scale(0.97);
+            }
+            100% {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+    </style>
+</body></html>

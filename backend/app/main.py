@@ -26,9 +26,16 @@ socket_app = socketio.ASGIApp(sio, socketio_path="socket.io")
 app.mount("/socket.io", socket_app)
 
 app.include_router(api_router, prefix="/api/v1")
+allowed_origins = list(
+    {
+        settings.frontend_url.rstrip("/"),
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    }
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

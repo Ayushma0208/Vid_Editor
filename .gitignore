@@ -18,7 +18,9 @@ backend/.venv
 backend/venv/
 backend/env/
 backend/__pycache__/
+**/__pycache__/
 backend/*.py[cod]
+**/*.py[cod]
 backend/*$py.class
 backend/.pytest_cache/
 backend/.coverage

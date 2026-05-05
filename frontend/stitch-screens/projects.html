@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Clip AI - Projects</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Syne:wght@700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "primary-fixed-dim": "#b4c5ff",
+                      "surface-container-high": "#e7e7f3",
+                      "surface-dim": "#d9d9e5",
+                      "primary-fixed": "#dbe1ff",
+                      "primary": "#004ac6",
+                      "surface-bright": "#faf8ff",
+                      "on-secondary-fixed": "#25005a",
+                      "on-surface": "#191b23",
+                      "on-primary-fixed": "#00174b",
+                      "secondary": "#712ae2",
+                      "on-tertiary-fixed-variant": "#7d2d00",
+                      "on-secondary-container": "#fffbff",
+                      "on-error": "#ffffff",
+                      "surface-variant": "#e1e2ed",
+                      "outline-variant": "#c3c6d7",
+                      "error-container": "#ffdad6",
+                      "error": "#ba1a1a",
+                      "surface-tint": "#0053db",
+                      "on-primary": "#ffffff",
+                      "surface": "#faf8ff",
+                      "inverse-surface": "#2e3039",
+                      "on-tertiary-fixed": "#360f00",
+                      "on-tertiary-container": "#ffede6",
+                      "tertiary-fixed": "#ffdbcd",
+                      "secondary-fixed": "#eaddff",
+                      "on-primary-fixed-variant": "#003ea8",
+                      "inverse-primary": "#b4c5ff",
+                      "primary-container": "#2563eb",
+                      "surface-container-low": "#f3f3fe",
+                      "secondary-container": "#8a4cfc",
+                      "on-tertiary": "#ffffff",
+                      "tertiary": "#943700",
+                      "on-error-container": "#93000a",
+                      "background": "#faf8ff",
+                      "surface-container-lowest": "#ffffff",
+                      "tertiary-fixed-dim": "#ffb596",
+                      "outline": "#737686",
+                      "on-background": "#191b23",
+                      "surface-container-highest": "#e1e2ed",
+                      "on-secondary": "#ffffff",
+                      "inverse-on-surface": "#f0f0fb",
+                      "on-secondary-fixed-variant": "#5a00c6",
+                      "on-surface-variant": "#434655",
+                      "on-primary-container": "#eeefff",
+                      "secondary-fixed-dim": "#d2bbff",
+                      "tertiary-container": "#bc4800",
+                      "surface-container": "#ededf9"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.25rem",
+                      "lg": "0.5rem",
+                      "xl": "0.75rem",
+                      "full": "9999px"
+              },
+              "spacing": {
+                      "inspector-width": "320px",
+                      "lg": "24px",
+                      "base": "4px",
+                      "xs": "4px",
+                      "xl": "32px",
+                      "panel-gutter": "1px",
+                      "sm": "8px",
+                      "sidebar-width": "280px",
+                      "md": "16px"
+              },
+              "fontFamily": {
+                      "display-pro": ["Syne", "sans-serif"],
+                      "body-md": ["DM Sans", "sans-serif"],
+                      "technical-mono": ["JetBrains Mono", "monospace"],
+                      "h1-bold": ["Syne", "sans-serif"],
+                      "timecode-lg": ["JetBrains Mono", "monospace"],
+                      "body-sm": ["DM Sans", "sans-serif"]
+              },
+              "fontSize": {
+                      "display-pro": ["48px", { "lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "800" }],
+                      "body-md": ["14px", { "lineHeight": "1.5", "fontWeight": "400" }],
+                      "technical-mono": ["12px", { "lineHeight": "1", "letterSpacing": "0.05em", "fontWeight": "500" }],
+                      "h1-bold": ["24px", { "lineHeight": "1.2", "fontWeight": "700" }],
+                      "timecode-lg": ["18px", { "lineHeight": "1", "fontWeight": "600" }],
+                      "body-sm": ["13px", { "lineHeight": "1.4", "fontWeight": "400" }]
+              }
+            }
+          }
+        }
+    </script>
+<style>
+        /* Custom utilities based on style guide */
+        .glass-panel {
+            background-color: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+        }
+        .surgical-border {
+            border-color: #e1e2ed; /* surface-variant proxy for Slate 200 */
+        }
+        .premium-shadow {
+            box-shadow: 0 2px 4px -1px rgba(0,0,0,0.03), 0 10px 15px -3px rgba(0,0,0,0.05), 0 20px 30px -5px rgba(0,0,0,0.08);
+        }
+        .hide-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .hide-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body class="bg-surface-container-lowest text-on-surface h-screen w-screen overflow-hidden font-body-md text-body-md flex flex-col">
+<!-- TopAppBar -->
+<header class="bg-white/70 backdrop-blur-xl border-b border-surface-variant shadow-[0_2px_10px_-3px_rgba(0,0,0,0.07)] flex items-center justify-between px-4 h-12 w-full sticky top-0 z-50">
+<div class="flex items-center gap-6">
+<span class="text-xl font-black text-slate-900 tracking-tighter">Clip AI</span>
+<!-- Navigation Links -->
+<nav class="hidden md:flex items-center gap-1">
+<a class="font-['Syne'] font-bold text-sm tracking-tight text-primary border-b-2 border-primary px-3 py-1 flex flex-col h-full justify-center active:scale-95 transition-transform" href="#">Project</a>
+<a class="font-['Syne'] font-bold text-sm tracking-tight text-outline hover:text-surface-tint transition-colors duration-200 px-3 py-1 flex flex-col h-full justify-center active:scale-95 transition-transform" href="#">Edit</a>
+<a class="font-['Syne'] font-bold text-sm tracking-tight text-outline hover:text-surface-tint transition-colors duration-200 px-3 py-1 flex flex-col h-full justify-center active:scale-95 transition-transform" href="#">View</a>
+<a class="font-['Syne'] font-bold text-sm tracking-tight text-outline hover:text-surface-tint transition-colors duration-200 px-3 py-1 flex flex-col h-full justify-center active:scale-95 transition-transform" href="#">Export</a>
+</nav>
+</div>
+<!-- Search Bar (on_left in JSON, but placed in center/right naturally for topbar if links are on left) -->
+<div class="flex-1 max-w-md mx-8 hidden lg:block">
+<div class="relative flex items-center w-full">
+<span class="material-symbols-outlined absolute left-2 text-outline text-[18px]">search</span>
+<input class="w-full bg-transparent border-0 border-b border-surface-variant focus:border-primary focus:ring-0 focus:border-b focus:outline-none pl-8 py-1 font-body-sm text-body-sm text-on-surface placeholder:text-outline transition-colors" placeholder="Search components, media..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<button class="bg-gradient-to-r from-primary to-secondary text-on-primary font-body-sm text-body-sm px-4 py-1.5 rounded-lg font-medium active:scale-95 transition-transform">Upgrade</button>
+<div class="flex items-center gap-2 text-outline">
+<button class="hover:text-surface-tint transition-colors duration-200 active:scale-95 transition-transform p-1"><span class="material-symbols-outlined text-[20px]">notifications</span></button>
+<button class="hover:text-surface-tint transition-colors duration-200 active:scale-95 transition-transform p-1"><span class="material-symbols-outlined text-[20px]">settings</span></button>
+</div>
+<img alt="Editor Profile" class="w-7 h-7 rounded-full object-cover border border-surface-variant" data-alt="A close-up studio portrait of a professional female video editor in a brightly lit, modern minimalist workspace. The lighting is high-key and soft, illuminating her features against a pure white background, fitting a sleek light-mode UI aesthetic." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCl0jQpubTVSLAXlhOYdyMGVwRzpsgbHtyUv1qv9XhsoW9MUYXLkNY9xGgJzhTux6GgwHF0VNL5zcSFsz2mG1d1dMw5izMiScmc2WyjpVK7jFvq8XTxL4n25k1YrErfL087f1FQH47t1ZJsj8cZZdgm5MiRFapcyNKTr0E8wGOi-qsw5xSzbZ2trYNTaQYnqhskXzlF1MbkOHr2XyLyM5HbShKZ5wTmLCWeMBB_LOfuCcIWy3DnZjWxMRUAU6-02QDsm9RL7Eqqlvc"/>
+</div>
+</header>
+<div class="flex flex-1 h-[calc(100vh-48px)] overflow-hidden">
+<!-- SideNavBar -->
+<aside class="bg-surface-container-lowest fixed left-0 top-12 h-[calc(100vh-48px)] w-20 border-r border-surface-variant flex flex-col items-center py-4 space-y-6 z-40 transition-all duration-150 ease-in-out">
+<div class="flex flex-col gap-2 mb-4 items-center">
+<div class="w-10 h-10 rounded-lg bg-surface-container-high flex items-center justify-center mb-1">
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">movie</span>
+</div>
+<div class="hidden text-center">
+<span class="font-['Syne'] font-bold text-[10px] leading-tight block">Project Alpha</span>
+<span class="font-['JetBrains_Mono'] text-[9px] text-outline">v1.2.0</span>
+</div>
+</div>
+<nav class="flex flex-col gap-2 w-full px-2 flex-1">
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg text-outline hover:bg-surface hover:text-on-surface transition-all duration-150 ease-in-out group relative">
+<span class="material-symbols-outlined text-[24px]">video_library</span>
+<span class="font-['JetBrains_Mono'] text-[9px] uppercase tracking-widest opacity-0 group-hover:opacity-100 absolute bottom-1 transition-opacity">Media</span>
+</button>
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg text-outline hover:bg-surface hover:text-on-surface transition-all duration-150 ease-in-out group relative">
+<span class="material-symbols-outlined text-[24px]">auto_awesome</span>
+<span class="font-['JetBrains_Mono'] text-[9px] uppercase tracking-widest opacity-0 group-hover:opacity-100 absolute bottom-1 transition-opacity">Effects</span>
+</button>
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg text-outline hover:bg-surface hover:text-on-surface transition-all duration-150 ease-in-out group relative">
+<span class="material-symbols-outlined text-[24px]">auto_fix_high</span>
+<span class="font-['JetBrains_Mono'] text-[9px] uppercase tracking-widest opacity-0 group-hover:opacity-100 absolute bottom-1 transition-opacity">Trans</span>
+</button>
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg text-outline hover:bg-surface hover:text-on-surface transition-all duration-150 ease-in-out group relative">
+<span class="material-symbols-outlined text-[24px]">title</span>
+<span class="font-['JetBrains_Mono'] text-[9px] uppercase tracking-widest opacity-0 group-hover:opacity-100 absolute bottom-1 transition-opacity">Text</span>
+</button>
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg bg-surface-container-low text-primary border-r-2 border-primary transition-all duration-150 ease-in-out group relative">
+<span class="material-symbols-outlined text-[24px]" style="font-variation-settings: 'FILL' 1;">folder_special</span>
+<span class="font-['JetBrains_Mono'] text-[9px] uppercase tracking-widest opacity-0 group-hover:opacity-100 absolute bottom-1 transition-opacity">Library</span>
+</button>
+</nav>
+<div class="flex flex-col gap-2 w-full px-2 mt-auto">
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg text-outline hover:bg-surface hover:text-on-surface transition-all duration-150 ease-in-out">
+<span class="material-symbols-outlined text-[20px]">help</span>
+</button>
+<button class="flex flex-col items-center justify-center gap-1 w-full py-3 rounded-lg text-outline hover:bg-surface hover:text-on-surface transition-all duration-150 ease-in-out">
+<span class="material-symbols-outlined text-[20px]">chat_bubble</span>
+</button>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="flex-1 ml-20 h-full overflow-y-auto bg-surface-bright hide-scrollbar p-xl">
+<!-- Page Header -->
+<div class="flex items-end justify-between mb-8">
+<div>
+<h1 class="font-h1-bold text-h1-bold text-on-surface mb-2">Your Projects</h1>
+<p class="font-body-sm text-body-sm text-on-surface-variant">Manage, edit, and export your video assets.</p>
+</div>
+<div class="flex items-center gap-4">
+<!-- Secondary Ghost Button (Filter) -->
+<button class="border border-surface-variant text-on-surface hover:bg-surface-container-low px-4 py-2 rounded-lg font-body-sm text-body-sm flex items-center gap-2 transition-colors">
+<span class="material-symbols-outlined text-[18px]">filter_list</span>
+                        Filter
+                    </button>
+<!-- Primary Button Gradient -->
+<button class="bg-gradient-to-r from-primary to-secondary text-on-primary px-5 py-2 rounded-lg font-body-sm text-body-sm font-medium flex items-center gap-2 hover:opacity-90 transition-opacity shadow-lg shadow-primary/20">
+<span class="material-symbols-outlined text-[18px]">add</span>
+                        New Project
+                    </button>
+</div>
+</div>
+<!-- Bento Grid of Projects -->
+<div class="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-lg pb-xl">
+<!-- Project Card 1: Ready -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300">
+<div class="relative w-full aspect-video rounded-lg overflow-hidden bg-surface-container-high">
+<img alt="Project Thumbnail" class="w-full h-full object-cover" data-alt="A crisp, high-definition still from a professional cinematic video project. The scene shows a minimalist, sunlit architectural interior with stark contrasts between pristine white walls and deep geometric shadows. The overall aesthetic is clean, premium, and fits perfectly within a light-mode design application context." src="https://lh3.googleusercontent.com/aida-public/AB6AXuD0taK7dQhzIBL64biMFKFRecsfLvs0_8L_a1RsN2r2iq-GmRbsKepv_Hlp9cdSA17tEb7iclTwfWyBbM59BcYZAPBIBDP3PVyFWi1L7aNY1QDTKFHOpXJDBDs3wdOKO4uhMl-1HBE9EmaHMyNkHz_J3NplRo0X1lnWEkcBwGFXnw4uBFOXtYjiQmgdYSGdxeR_Av33Av6pk4S03cuRszO7-OwiSjtrM8mx-YPV3dKERwrk8kKhuTxtJjYU5vW1MFFBrMVqkpCApGA"/>
+<div class="absolute inset-0 ring-1 ring-white/20 rounded-lg pointer-events-none"></div>
+<div class="absolute bottom-2 right-2 bg-on-surface/80 backdrop-blur-md px-2 py-0.5 rounded font-technical-mono text-technical-mono text-white">02:14:05</div>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-on-surface leading-snug mb-1 group-hover:text-primary transition-colors">Corporate Brand Anthem</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant flex items-center gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                Ready
+                            </p>
+</div>
+<button class="text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[20px]">more_vert</span></button>
+</div>
+</div>
+<!-- Project Card 2: Downloading -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300">
+<div class="relative w-full aspect-video rounded-lg overflow-hidden bg-surface-container-low flex items-center justify-center">
+<img alt="Project Thumbnail" class="w-full h-full object-cover opacity-60 grayscale-[30%]" data-alt="A slightly blurred, in-progress video frame showing a moody, atmospheric neon-lit city street at dusk. The image is overlayed with a subtle white glassmorphic haze, indicating it is currently downloading or processing within a sophisticated creative tool interface." src="https://lh3.googleusercontent.com/aida-public/AB6AXuASrbkCMYmpEto5GO_-bbb-4ytXMfJ9pvCzC_Uow4pZG-CLydeVcd4jzaBPSY8-I6_A-7Enti3AL4Qv2AV5sVfQOPqoJVAKMvCMC5YW1Ue0bLZK4DKq10KUkBGD0azO3VyI4iHkmf7uU2oqsNs9tR_29a_HwtmGd0J2Fl2x94f9ryKBodc1oZKZDgtWT0l2egc6Ub8xOyDTpNmIg4Mjgp16UDYzMNEHw2iPEIN4npHr-Zhc6IocfPbZ9qna0Viz_Qa51lS30CYg_Qc"/>
+<div class="absolute inset-0 bg-surface-container-lowest/20 backdrop-blur-[2px]"></div>
+<div class="absolute inset-0 ring-1 ring-white/20 rounded-lg pointer-events-none"></div>
+<!-- Progress indicator -->
+<div class="absolute z-10 w-12 h-12 rounded-full bg-surface-container-lowest/80 backdrop-blur-md flex items-center justify-center shadow-sm">
+<span class="material-symbols-outlined text-secondary animate-pulse" style="font-variation-settings: 'FILL' 1;">cloud_download</span>
+</div>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-on-surface leading-snug mb-1">Cyberpunk B-Roll Pack</h3>
+<p class="font-body-sm text-body-sm text-secondary flex items-center gap-1.5 font-medium">
+<span class="material-symbols-outlined text-[14px]">sync</span>
+                                Downloading 45%
+                            </p>
+</div>
+<button class="text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[20px]">more_vert</span></button>
+</div>
+</div>
+<!-- Project Card 3: Error -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-error-container flex flex-col gap-3 transition-all duration-300 bg-error-container/10">
+<div class="relative w-full aspect-video rounded-lg overflow-hidden bg-surface-container-high">
+<div class="absolute inset-0 flex flex-col items-center justify-center bg-surface-container-lowest/80 text-error gap-2">
+<span class="material-symbols-outlined text-[32px]">broken_image</span>
+<span class="font-technical-mono text-[10px] uppercase">Missing Media</span>
+</div>
+<div class="absolute inset-0 ring-1 ring-error/20 rounded-lg pointer-events-none"></div>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-on-surface leading-snug mb-1">Q3 Financial Report</h3>
+<p class="font-body-sm text-body-sm text-error flex items-center gap-1.5 font-medium">
+<span class="material-symbols-outlined text-[14px]">error</span>
+                                Sync Failed
+                            </p>
+</div>
+<button class="text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[20px]">more_vert</span></button>
+</div>
+</div>
+<!-- Project Card 4: Hovered State -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-primary/30 flex flex-col gap-3 transition-all duration-300 transform -translate-y-[2px] premium-shadow z-10">
+<div class="relative w-full aspect-video rounded-lg overflow-hidden bg-surface-container-high">
+<img alt="Project Thumbnail" class="w-full h-full object-cover scale-105 transition-transform duration-500" data-alt="A vibrant, abstract 3D motion graphic render featuring smooth, glossy liquid gradients transitioning between electric blue and deep violet. The scene is lit with bright, clean studio lighting that creates sharp, premium reflections, perfectly aligned with a high-end UI aesthetic." src="https://lh3.googleusercontent.com/aida-public/AB6AXuC4t0W2PX6tU985gwM7jmP-b0bWPBOBcYaz6r32KIPE5q3LxEb96bhUPbZR3BhKEsLrerWxDmQ5wxq0NZrt_ptNrgC13BGsaT0SzHBVXR62OVFdTp1jknp2eqDcTyguxfyWc4cucLkrJGi1TCOhgZHb6UfRrFUoKZorTMalWL5ixvtOjtRLNQQnPAVq3MB2JtGuV-1DqLPTayy5Pz6MhprYpDLVuyX2Zp8PNBWxAgE8t6IFy9MhcUrA1ehybt2pjrVGGicJ3VP6RZ4"/>
+<!-- Hover Overlay -->
+<div class="absolute inset-0 bg-gradient-to-t from-on-surface/80 via-transparent to-transparent opacity-100 transition-opacity flex flex-col justify-end p-3">
+<div class="flex gap-2">
+<button class="flex-1 bg-primary text-white font-body-sm text-body-sm py-1.5 rounded flex items-center justify-center gap-1 backdrop-blur-md bg-primary/90">
+<span class="material-symbols-outlined text-[16px]" style="font-variation-settings: 'FILL' 1;">play_arrow</span> Open
+                                </button>
+<button class="w-8 h-8 bg-white/20 text-white rounded flex items-center justify-center backdrop-blur-md hover:bg-white/30 transition-colors">
+<span class="material-symbols-outlined text-[16px]">share</span>
+</button>
+</div>
+</div>
+<div class="absolute inset-0 ring-1 ring-white/30 rounded-lg pointer-events-none"></div>
+<div class="absolute top-2 right-2 bg-surface-container-lowest/90 backdrop-blur-md px-2 py-0.5 rounded shadow-sm border border-surface-variant flex items-center gap-1">
+<span class="w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+<span class="font-technical-mono text-[9px] text-on-surface uppercase font-bold">Rendering</span>
+</div>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-primary leading-snug mb-1">Abstract UI Transitions v2</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant flex items-center gap-1.5">
+<span class="font-technical-mono text-[10px] bg-surface-container-highest px-1.5 py-0.5 rounded text-on-surface-variant">4K 60fps</span>
+                                12 mins ago
+                            </p>
+</div>
+<button class="text-on-surface"><span class="material-symbols-outlined text-[20px]">more_vert</span></button>
+</div>
+</div>
+<!-- Project Card 5: Ready -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300">
+<div class="relative w-full aspect-video rounded-lg overflow-hidden bg-surface-container-high">
+<img alt="Project Thumbnail" class="w-full h-full object-cover" data-alt="A professional photography shot of a sleek, minimalist desk setup featuring high-end camera equipment, lenses, and a tablet. The color palette is muted and sophisticated, with pure whites, slate grays, and natural wood textures, conveying a focused creative workspace." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDJa3uschLYbftwoK-I5ESo-4dL50imR1SAWh7d4vetuZ5hN_opPFNBrNBoOb5AXCWVZMlraH-DQHJSQBPQ96L_LbvYXWdQ6i2j_jz5dj4vp-ckuK1Q8Nvs0581ywaBHq9_dNXYADrcy_bPj55gV4BE6LVXEBCVqAWCb8IeVhsgGAau-A-WW6zuE8j8Q4zvDzz4q6FYpNWYxOtr4Qlokr_TQcZa7pwnPlHgHcuoBMbuYWMlTIXiN0isSQfLpYMLa4itVBwf_2jgUP0"/>
+<div class="absolute inset-0 ring-1 ring-white/20 rounded-lg pointer-events-none"></div>
+<div class="absolute bottom-2 right-2 bg-on-surface/80 backdrop-blur-md px-2 py-0.5 rounded font-technical-mono text-technical-mono text-white">00:45:12</div>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-on-surface leading-snug mb-1 group-hover:text-primary transition-colors">Workspace Setup Tour</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant flex items-center gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                Ready
+                            </p>
+</div>
+<button class="text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[20px]">more_vert</span></button>
+</div>
+</div>
+<!-- Project Card 6: Ready -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300">
+<div class="relative w-full aspect-video rounded-lg overflow-hidden bg-surface-container-high">
+<img alt="Project Thumbnail" class="w-full h-full object-cover" data-alt="A macro shot of a retro-modern synthesizer keyboard with glowing LED indicators in a brightly lit studio. The aesthetic is clean and technical, emphasizing precision hardware. The bright, high-key lighting supports a minimalist, light-mode interface." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCZIf1DsZAG_mgewGc295Me5GVodEUUsLz0lkH2q6JvfH6qt9GI72QLnVWMsXzL8DdqQx7DcC-Fup1cuzwHwzT6y66lZFyvp0XMmPaB0xDXbQOF6TPBLJJWEB_mIa4kfxbZEb4fqvqnp2I1gbs3WWp6v94hbon27hcGRSPCHg6w5MDWnR8YqydXTyRuRJBo2quK7tCrixNnjEYBW0bEI4oZvbmnqi4aFxP6DAeROxFMJz58s8-wGj8UfXkvDPnOb0Y_2e25UC_d4A0"/>
+<div class="absolute inset-0 ring-1 ring-white/20 rounded-lg pointer-events-none"></div>
+<div class="absolute bottom-2 right-2 bg-on-surface/80 backdrop-blur-md px-2 py-0.5 rounded font-technical-mono text-technical-mono text-white">01:02:00</div>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-on-surface leading-snug mb-1 group-hover:text-primary transition-colors">Synthwave Audio Visualizer</h3>
+<p class="font-body-sm text-body-sm text-on-surface-variant flex items-center gap-1.5">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                                Ready
+                            </p>
+</div>
+<button class="text-outline hover:text-on-surface"><span class="material-symbols-outlined text-[20px]">more_vert</span></button>
+</div>
+</div>
+<!-- Project Cards 7-9 (Simplified for length, maintaining structure) -->
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300 opacity-80 hover:opacity-100">
+<div class="relative w-full aspect-video rounded-lg bg-surface-container flex items-center justify-center border border-dashed border-outline-variant">
+<span class="material-symbols-outlined text-outline text-[32px]">add_photo_alternate</span>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-outline leading-snug mb-1">Untitled Draft</h3>
+<p class="font-body-sm text-body-sm text-outline flex items-center gap-1.5">Empty Project</p>
+</div>
+</div>
+</div>
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300 opacity-80 hover:opacity-100">
+<div class="relative w-full aspect-video rounded-lg bg-surface-container flex items-center justify-center border border-dashed border-outline-variant">
+<span class="material-symbols-outlined text-outline text-[32px]">add_photo_alternate</span>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-outline leading-snug mb-1">Untitled Draft 2</h3>
+<p class="font-body-sm text-body-sm text-outline flex items-center gap-1.5">Empty Project</p>
+</div>
+</div>
+</div>
+<div class="group relative bg-surface-container-lowest rounded-xl p-3 border border-surface-variant flex flex-col gap-3 transition-all duration-300 opacity-80 hover:opacity-100">
+<div class="relative w-full aspect-video rounded-lg bg-surface-container flex items-center justify-center border border-dashed border-outline-variant">
+<span class="material-symbols-outlined text-outline text-[32px]">add_photo_alternate</span>
+</div>
+<div class="flex justify-between items-start px-1">
+<div>
+<h3 class="font-body-md text-body-md font-medium text-outline leading-snug mb-1">Untitled Draft 3</h3>
+<p class="font-body-sm text-body-sm text-outline flex items-center gap-1.5">Empty Project</p>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+<!-- Modal Overlay: Add YouTube Video -->
+<div class="fixed inset-0 z-[100] bg-on-surface/20 backdrop-blur-sm flex items-center justify-center">
+<!-- Multi-layered shadow container for modal -->
+<div class="w-[480px] bg-surface-container-lowest rounded-xl shadow-[0_2px_4px_-1px_rgba(0,0,0,0.03),0_10px_15px_-3px_rgba(0,0,0,0.05),0_30px_60px_-10px_rgba(0,0,0,0.15)] ring-1 ring-surface-variant flex flex-col overflow-hidden">
+<!-- Modal Header -->
+<div class="flex items-center justify-between px-6 py-4 border-b border-surface-variant bg-surface-bright/50">
+<h2 class="font-h1-bold text-[18px] font-bold text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-error" style="font-variation-settings: 'FILL' 1;">smart_display</span>
+                    Import from YouTube
+                </h2>
+<button class="text-outline hover:text-on-surface transition-colors p-1 rounded-md hover:bg-surface-variant/50">
+<span class="material-symbols-outlined text-[20px]">close</span>
+</button>
+</div>
+<!-- Modal Body -->
+<div class="p-6 flex flex-col gap-6">
+<!-- Minimalist Input Field -->
+<div class="relative">
+<label class="block font-technical-mono text-[10px] text-outline uppercase mb-2">YouTube URL</label>
+<div class="relative flex items-center">
+<span class="material-symbols-outlined absolute left-0 text-outline text-[20px] pointer-events-none">link</span>
+<input class="w-full bg-transparent border-0 border-b border-surface-variant focus:border-primary focus:ring-0 focus:border-b-2 focus:outline-none pl-8 py-2 font-body-md text-body-md text-on-surface transition-colors" type="text" value="https://youtube.com/watch?v=dQw4w9WgXcQ"/>
+</div>
+</div>
+<!-- Small Preview Card -->
+<div class="flex gap-4 p-3 rounded-lg border border-surface-variant bg-surface-container-lowest/50">
+<div class="w-24 h-[54px] rounded bg-surface-container overflow-hidden relative flex-shrink-0">
+<img alt="YouTube Thumbnail" class="w-full h-full object-cover" data-alt="A bright, colorful thumbnail graphic commonly seen on online video platforms, featuring a clean white backdrop overlaid with abstract, glossy 3D shapes in vivid neon colors like cyan, magenta, and yellow. The style is modern, pop-tech, and highly engaging." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDCr1H-xSdyxoFR1aahhCq8Q6vnOC7PE4fwWKdU32zuU6KjCeJGAGVNQ2114xVqy9kf0XVh9YeE3PNj-oxNYs7eWXoJ2VlRq4My5fxlPo2tD3RGpH0S-NXxP2WqeFyB3wfAKpxqwBFO3OBDRlxFAQA2SfkW6C8F8iZZCnEUFdn5u4ar_xuEDKXcm6D6cw4ZNYLmYLCC5Y7Jug77tYDLOys-HfQ6VLDYIGYyEgWe1D60JPSl3fYdL87cVvyfw85MldGMoUyFs3TGDT0"/>
+<div class="absolute inset-0 ring-1 ring-black/10 rounded pointer-events-none"></div>
+<div class="absolute bottom-1 right-1 bg-on-surface/80 px-1 rounded-sm font-technical-mono text-[8px] text-white">03:32</div>
+</div>
+<div class="flex flex-col justify-center overflow-hidden">
+<h4 class="font-body-md text-body-md font-medium text-on-surface truncate">Never Gonna Give You Up - Official 4K Remaster</h4>
+<p class="font-body-sm text-[12px] text-on-surface-variant truncate">Rick Astley • 1.2B views</p>
+</div>
+</div>
+</div>
+<!-- Modal Footer -->
+<div class="px-6 py-4 border-t border-surface-variant flex items-center justify-end gap-3 bg-surface-bright">
+<button class="px-4 py-2 font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors">Cancel</button>
+<button class="bg-primary text-on-primary px-5 py-2 rounded-lg font-body-sm text-body-sm font-medium flex items-center gap-2 hover:bg-surface-tint transition-colors shadow-sm">
+<span class="material-symbols-outlined text-[18px]">download</span>
+                    Import Media
+                </button>
+</div>
+</div>
+</div>
+</body></html>

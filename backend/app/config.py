@@ -7,12 +7,14 @@ class Settings(BaseSettings):
     cloudinary_cloud_name: str
     cloudinary_api_key: str
     cloudinary_api_secret: str
+    cloudinary_url: str = ""
     pexels_api_key: str
     pixabay_api_key: str
     youtube_client_id: str
     youtube_client_secret: str
-    instagram_app_id: str
-    instagram_app_secret: str
+    youtube_api_key: str = ""
+    instagram_app_id: str = ""
+    instagram_app_secret: str = ""
     redis_url: str
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
 
