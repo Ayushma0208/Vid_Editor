@@ -2,30 +2,15 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
+from asgiref.sync import async_to_sync
 from beanie import PydanticObjectId
 from celery.exceptions import MaxRetriesExceededError
 
 from app.celery_worker import celery_app
 from app.config import settings
-from app.database import init_db
 from app.models.project import Project, ProjectStatus
 from app.services.cloudinary_service import CloudinaryService
 from app.services.ytdlp_service import YTDLPService
-
-_db_initialized = False
-_db_init_lock = asyncio.Lock()
-
-
-async def _ensure_db_initialized() -> None:
-    global _db_initialized
-    if _db_initialized:
-        return
-    async with _db_init_lock:
-        if _db_initialized:
-            return
-        await init_db()
-        _db_initialized = True
-
 
 async def _set_project_error(project: Project, error_message: str) -> None:
     metadata = project.metadata or {}
@@ -37,7 +22,6 @@ async def _set_project_error(project: Project, error_message: str) -> None:
 
 
 async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
-    await _ensure_db_initialized()
     project = await Project.get(PydanticObjectId(project_id))
     if not project:
         raise ValueError("Project not found")
@@ -86,15 +70,14 @@ async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
 @celery_app.task(bind=True, name="download_video_task", max_retries=2)
 def download_video_task(self, project_id: str, video_url: str):
     try:
-        return asyncio.run(_run_download_pipeline(project_id, video_url))
+        return async_to_sync(_run_download_pipeline)(project_id, video_url)
     except Exception as exc:
         async def _mark_error() -> None:
-            await _ensure_db_initialized()
             project = await Project.get(PydanticObjectId(project_id))
             if project:
                 await _set_project_error(project, str(exc))
 
-        asyncio.run(_mark_error())
+        async_to_sync(_mark_error)()
 
         try:
             raise self.retry(exc=exc, countdown=30)

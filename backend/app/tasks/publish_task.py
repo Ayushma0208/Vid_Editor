@@ -1,26 +1,14 @@
 import asyncio
 from pathlib import Path
 
+from asgiref.sync import async_to_sync
 from beanie import PydanticObjectId
 
 from app.celery_worker import celery_app
-from app.database import init_db
 from app.models.clip import Clip
 from app.services.publish_service import PublishService
 
-_db_initialized = False
-
-
-async def _ensure_db_initialized() -> None:
-    global _db_initialized
-    if _db_initialized:
-        return
-    await init_db()
-    _db_initialized = True
-
-
 async def _publish_clip(platform: str, clip_id: str, user_id: str) -> dict:
-    await _ensure_db_initialized()
     clip = await Clip.get(PydanticObjectId(clip_id))
     if not clip or clip.user_id != user_id:
         raise RuntimeError("Clip not found")
@@ -54,15 +42,14 @@ async def _publish_clip(platform: str, clip_id: str, user_id: str) -> dict:
 @celery_app.task(bind=True, name="publish_clip_task")
 def publish_clip_task(self, platform: str, clip_id: str, user_id: str):
     try:
-        return asyncio.run(_publish_clip(platform=platform, clip_id=clip_id, user_id=user_id))
+        return async_to_sync(_publish_clip)(platform=platform, clip_id=clip_id, user_id=user_id)
     except Exception as exc:
         async def _mark_error() -> None:
-            await _ensure_db_initialized()
             clip = await Clip.get(PydanticObjectId(clip_id))
             if clip:
                 clip.publish_platform = platform
                 clip.publish_status = "error"
                 await clip.save()
 
-        asyncio.run(_mark_error())
+        async_to_sync(_mark_error)()
         raise exc

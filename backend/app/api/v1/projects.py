@@ -29,7 +29,10 @@ class CreateProjectRequest(BaseModel):
 
 
 def serialize_document(doc: Any) -> dict[str, Any]:
-    return jsonable_encoder(doc.model_dump(by_alias=True))
+    data = jsonable_encoder(doc.model_dump(by_alias=True))
+    if "_id" in data:
+        data["id"] = str(data.pop("_id"))
+    return data
 
 
 def parse_video_id(yt_url: str) -> str:

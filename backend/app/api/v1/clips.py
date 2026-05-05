@@ -27,7 +27,10 @@ class UpdateClipRequest(BaseModel):
 
 
 def serialize_document(doc: Any) -> dict[str, Any]:
-    return jsonable_encoder(doc.model_dump(by_alias=True))
+    data = jsonable_encoder(doc.model_dump(by_alias=True))
+    if "_id" in data:
+        data["id"] = str(data.pop("_id"))
+    return data
 
 
 def validate_clip_window(payload: CreateClipRequest, project_duration_seconds: float | None) -> None:

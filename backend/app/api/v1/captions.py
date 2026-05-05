@@ -29,7 +29,10 @@ class UpdateCaptionRequest(BaseModel):
 
 
 def serialize_document(doc: Any) -> dict[str, Any]:
-    return jsonable_encoder(doc.model_dump(by_alias=True))
+    data = jsonable_encoder(doc.model_dump(by_alias=True))
+    if "_id" in data:
+        data["id"] = str(data.pop("_id"))
+    return data
 
 
 @router.post("/projects/{project_id}/captions", status_code=status.HTTP_201_CREATED)

@@ -40,7 +40,10 @@ class SaveAssetRequest(BaseModel):
 
 
 def serialize_document(doc: Any) -> dict[str, Any]:
-    return jsonable_encoder(doc.model_dump(by_alias=True))
+    data = jsonable_encoder(doc.model_dump(by_alias=True))
+    if "_id" in data:
+        data["id"] = str(data.pop("_id"))
+    return data
 
 
 def interleave_by_source(pexels_items: list[dict[str, Any]], pixabay_items: list[dict[str, Any]]) -> list[dict[str, Any]]:

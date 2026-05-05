@@ -1,34 +1,30 @@
 import asyncio
 from pathlib import Path
 
+from asgiref.sync import async_to_sync
 from beanie import PydanticObjectId
 
 from app.celery_worker import celery_app
 from app.config import settings
-from app.database import init_db
 from app.models.clip import Clip, ClipStatus
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
 from app.services.ffmpeg_service import FfmpegService
 
-_db_initialized = False
-_cache_lock = asyncio.Lock()
+_cache_lock = None
 _raw_video_cache: dict[str, dict[str, int | str]] = {}
 
-
-async def _ensure_db_initialized() -> None:
-    global _db_initialized
-    if _db_initialized:
-        return
-    await init_db()
-    _db_initialized = True
-
+def get_cache_lock():
+    global _cache_lock
+    if _cache_lock is None:
+        _cache_lock = asyncio.Lock()
+    return _cache_lock
 
 async def _acquire_raw_video(project: Project, project_id: str) -> str:
     if not project.cloudinary_raw_url:
         raise RuntimeError("Project raw video URL is missing")
 
-    async with _cache_lock:
+    async with get_cache_lock():
         cached = _raw_video_cache.get(project_id)
         if cached and Path(str(cached["path"])).exists():
             cached["ref_count"] = int(cached["ref_count"]) + 1
@@ -46,7 +42,7 @@ async def _acquire_raw_video(project: Project, project_id: str) -> str:
 
 
 async def _release_raw_video(project_id: str) -> None:
-    async with _cache_lock:
+    async with get_cache_lock():
         cached = _raw_video_cache.get(project_id)
         if not cached:
             return
@@ -83,7 +79,6 @@ async def _generate_thumbnail(input_path: str, output_path: str, mid_point: floa
 
 
 async def _process_clip(project_id: str, clip_id: str) -> dict:
-    await _ensure_db_initialized()
     project = await Project.get(PydanticObjectId(project_id))
     clip = await Clip.get(PydanticObjectId(clip_id))
     if not project or not clip:
@@ -144,4 +139,4 @@ async def _process_clip(project_id: str, clip_id: str) -> dict:
 
 @celery_app.task(name="create_clip_task")
 def create_clip_task(project_id: str, clip_id: str):
-    return asyncio.run(_process_clip(project_id, clip_id))
+    return async_to_sync(_process_clip)(project_id, clip_id)
