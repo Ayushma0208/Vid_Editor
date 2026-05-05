@@ -15,9 +15,16 @@ from app.celery_worker import celery_app
 from app.config import settings
 from app.database import database
 from app.database import init_db
+import socketio
+from app.socket_manager import sio
 
 
 app = FastAPI(title="Video Editing Platform API", version="1.0.0")
+
+# Mount Socket.IO application
+socket_app = socketio.ASGIApp(sio, socketio_path="socket.io")
+app.mount("/socket.io", socket_app)
+
 app.include_router(api_router, prefix="/api/v1")
 app.add_middleware(
     CORSMiddleware,

@@ -17,3 +17,5 @@ python-dotenv==1.0.1
 google-api-python-client==2.169.0
 google-auth-oauthlib==1.2.0
 asgiref==3.8.1
+python-socketio==5.11.2
+aio-pika==9.4.1
