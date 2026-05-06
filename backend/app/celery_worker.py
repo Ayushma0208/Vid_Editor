@@ -12,6 +12,7 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    broker_connection_retry_on_startup=True,
     imports=("app.tasks.download_task", "app.tasks.clip_task", "app.tasks.publish_task"),
 )
 

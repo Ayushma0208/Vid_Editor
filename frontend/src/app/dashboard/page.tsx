@@ -1,6 +1,6 @@
 "use client"
 
-import { FormEvent, useEffect, useMemo, useState } from "react"
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import api from "@/lib/api"
 
@@ -23,6 +23,14 @@ function formatDuration(totalSeconds?: number | null) {
   return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`
 }
 
+function statusBadge(status: string) {
+  const s = status.toLowerCase()
+  if (s === "ready") return { label: "Ready", className: "bg-emerald-100 text-emerald-700" }
+  if (s === "downloading") return { label: "Downloading…", className: "bg-blue-100 text-blue-700 animate-pulse" }
+  if (s === "error") return { label: "Error", className: "bg-red-100 text-red-700" }
+  return { label: "Pending", className: "bg-amber-100 text-amber-700" }
+}
+
 export default function DashboardPage() {
   const router = useRouter()
   const [projects, setProjects] = useState<ProjectItem[]>([])
@@ -31,17 +39,16 @@ export default function DashboardPage() {
   const [ytUrl, setYtUrl] = useState("")
   const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState<Set<string>>(new Set())
 
-  const loadProjects = async () => {
+  const loadProjects = useCallback(async () => {
     try {
       const response = await api.get("/api/v1/projects/")
       setProjects(Array.isArray(response.data) ? response.data : [])
     } catch {
-      setError("Could not load projects.")
-    } finally {
-      setIsLoading(false)
+      /* keep existing list on background poll failure */
     }
-  }
+  }, [])
 
   useEffect(() => {
     const token = localStorage.getItem("token")
@@ -61,6 +68,17 @@ export default function DashboardPage() {
         setIsLoading(false)
       })
   }, [router])
+
+  // Auto-refresh every 10s when any project is downloading/pending
+  useEffect(() => {
+    const hasInProgress = projects.some((p) => {
+      const s = (p.status || "").toLowerCase()
+      return s === "downloading" || s === "pending"
+    })
+    if (!hasInProgress) return
+    const interval = setInterval(loadProjects, 10000)
+    return () => clearInterval(interval)
+  }, [projects, loadProjects])
 
   const stats = useMemo(() => {
     const totalProjects = projects.length
@@ -84,6 +102,29 @@ export default function DashboardPage() {
     } finally {
       setIsCreating(false)
     }
+  }
+
+  const handleRetryDownload = async (e: React.MouseEvent, projectId: string) => {
+    e.stopPropagation()
+    setRetrying((prev) => new Set(prev).add(projectId))
+    try {
+      await api.post(`/api/v1/projects/${projectId}/retry-download`)
+      await loadProjects()
+    } catch {
+      setError("Retry failed. Please try again.")
+    } finally {
+      setRetrying((prev) => {
+        const next = new Set(prev)
+        next.delete(projectId)
+        return next
+      })
+    }
+  }
+
+  const handleCardClick = (project: ProjectItem) => {
+    const id = project.id || project._id
+    if (!id) return
+    router.push(`/project/${id}/clips`)
   }
 
   return (
@@ -149,23 +190,48 @@ export default function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
-            {projects.map((project) => (
-              <article key={project.id || project._id || project.title} className="rounded-xl border border-[#e1e2ed] bg-white p-3 shadow-sm">
-                <div className="relative mb-3 aspect-video overflow-hidden rounded-lg bg-[#ededf9]">
-                  {project.thumbnail_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={project.thumbnail_url} alt={project.title || "Project"} className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full items-center justify-center text-sm text-[#737686]">No thumbnail</div>
-                  )}
-                  <div className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-0.5 text-[11px] text-white">
-                    {formatDuration(project.duration_seconds)}
+            {projects.map((project) => {
+              const id = project.id || project._id || ""
+              const st = (project.status || "pending").toLowerCase()
+              const badge = statusBadge(st)
+              const isRetryable = st === "pending" || st === "error"
+              const isRetryingThis = retrying.has(id)
+
+              return (
+                <article
+                  key={id || project.title}
+                  onClick={() => handleCardClick(project)}
+                  className="cursor-pointer rounded-xl border border-[#e1e2ed] bg-white p-3 shadow-sm transition-all hover:border-[#004ac6]/40 hover:shadow-md"
+                >
+                  <div className="relative mb-3 aspect-video overflow-hidden rounded-lg bg-[#ededf9]">
+                    {project.thumbnail_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={project.thumbnail_url} alt={project.title || "Project"} className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-sm text-[#737686]">No thumbnail</div>
+                    )}
+                    <div className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-0.5 text-[11px] text-white">
+                      {formatDuration(project.duration_seconds)}
+                    </div>
                   </div>
-                </div>
-                <h3 className="line-clamp-2 text-sm font-medium">{project.title || "Untitled Project"}</h3>
-                <p className="mt-1 text-xs text-[#434655]">Status: {(project.status || "pending").toLowerCase()}</p>
-              </article>
-            ))}
+                  <h3 className="line-clamp-2 text-sm font-medium">{project.title || "Untitled Project"}</h3>
+                  <div className="mt-2 flex items-center justify-between">
+                    <span className={`inline-block rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${badge.className}`}>
+                      {badge.label}
+                    </span>
+                    {isRetryable && (
+                      <button
+                        onClick={(e) => handleRetryDownload(e, id)}
+                        disabled={isRetryingThis}
+                        className="rounded-md bg-[#004ac6] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#0053db] disabled:opacity-50"
+                      >
+                        {isRetryingThis ? "Retrying…" : "Retry Download"}
+                      </button>
+                    )}
+                  </div>
+                </article>
+              )
+            })}
           </div>
         )}
       </main>

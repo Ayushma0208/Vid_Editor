@@ -20,6 +20,7 @@ class Project(Document):
     yt_video_id: str
     status: ProjectStatus
     cloudinary_raw_url: str | None = None
+    local_video_path: str | None = None
     cloudinary_folder: str
     duration_seconds: float | None = None
     thumbnail_url: str | None = None

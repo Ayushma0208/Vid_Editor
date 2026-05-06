@@ -2,10 +2,12 @@ import asyncio
 import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api.dependencies import get_current_user_id
@@ -131,6 +133,31 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
     return data
 
 
+@router.post("/{project_id}/retry-download")
+async def retry_download(project_id: str, user_id: str = Depends(get_current_user_id)):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if project.status not in (ProjectStatus.PENDING, ProjectStatus.ERROR):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot retry download — project status is '{project.status.value}'",
+        )
+
+    project.status = ProjectStatus.PENDING
+    project.updated_at = datetime.now(timezone.utc)
+    metadata = project.metadata or {}
+    metadata.pop("error_message", None)
+    project.metadata = metadata
+    await project.save()
+
+    task = download_video_task.delay(str(project.id), project.yt_url)
+    data = serialize_document(project)
+    data["task_id"] = task.id
+    return data
+
+
 @router.delete("/{project_id}")
 async def delete_project(project_id: str, user_id: str = Depends(get_current_user_id)):
     project = await Project.get(project_id)
@@ -143,3 +170,42 @@ async def delete_project(project_id: str, user_id: str = Depends(get_current_use
     await project.delete()
 
     return {"deleted": True, "project_id": project_id}
+
+
+@router.get("/{project_id}/stream")
+async def stream_video(project_id: str, token: str = ""):
+    """Stream the raw video file. Accepts ?token=<jwt> for auth since <video> tags can't send headers."""
+    from jose import JWTError, jwt as jose_jwt
+    from app.config import settings as app_settings
+
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token required")
+
+    try:
+        payload = jose_jwt.decode(token, app_settings.jwt_secret_key, algorithms=[app_settings.jwt_algorithm])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if not project.local_video_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video file not available")
+
+    video_path = Path(project.local_video_path)
+    if not video_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video file not found on disk")
+
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        filename=f"{project.title or 'video'}.mp4",
+    )

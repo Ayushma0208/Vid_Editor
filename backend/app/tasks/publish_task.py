@@ -1,10 +1,10 @@
 import asyncio
 from pathlib import Path
 
-from asgiref.sync import async_to_sync
 from beanie import PydanticObjectId
 
 from app.celery_worker import celery_app
+import app.celery_worker as cw
 from app.models.clip import Clip
 from app.services.publish_service import PublishService
 
@@ -42,7 +42,8 @@ async def _publish_clip(platform: str, clip_id: str, user_id: str) -> dict:
 @celery_app.task(bind=True, name="publish_clip_task")
 def publish_clip_task(self, platform: str, clip_id: str, user_id: str):
     try:
-        return async_to_sync(_publish_clip)(platform=platform, clip_id=clip_id, user_id=user_id)
+        loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
+        return loop.run_until_complete(_publish_clip(platform=platform, clip_id=clip_id, user_id=user_id))
     except Exception as exc:
         async def _mark_error() -> None:
             clip = await Clip.get(PydanticObjectId(clip_id))
@@ -51,5 +52,6 @@ def publish_clip_task(self, platform: str, clip_id: str, user_id: str):
                 clip.publish_status = "error"
                 await clip.save()
 
-        async_to_sync(_mark_error)()
+        loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
+        loop.run_until_complete(_mark_error())
         raise exc

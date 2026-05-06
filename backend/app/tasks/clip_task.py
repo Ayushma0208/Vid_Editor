@@ -1,15 +1,16 @@
 import asyncio
 from pathlib import Path
 
-from asgiref.sync import async_to_sync
 from beanie import PydanticObjectId
 
 from app.celery_worker import celery_app
+import app.celery_worker as cw
 from app.config import settings
 from app.models.clip import Clip, ClipStatus
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
 from app.services.ffmpeg_service import FfmpegService
+
 
 _cache_lock = None
 _raw_video_cache: dict[str, dict[str, int | str]] = {}
@@ -36,7 +37,7 @@ async def _acquire_raw_video(project: Project, project_id: str) -> str:
 
         cloudinary_service = CloudinaryService()
         await cloudinary_service.download_to_path(project.cloudinary_raw_url, raw_video_path)
-
+        
         _raw_video_cache[project_id] = {"path": raw_video_path, "ref_count": 1}
         return raw_video_path
 
@@ -106,7 +107,7 @@ async def _process_clip(project_id: str, clip_id: str) -> dict:
 
         midpoint = clip.start_time + (clip.duration / 2)
         await _generate_thumbnail(clip_output_path, thumbnail_output_path, midpoint)
-
+        
         clip_upload = await cloudinary_service.upload_video(
             file_path=clip_output_path,
             folder=f"projects/{project_id}/clips/{clip_id}",
@@ -121,10 +122,10 @@ async def _process_clip(project_id: str, clip_id: str) -> dict:
         clip.cloudinary_public_id = clip_upload.get("public_id")
         clip.thumbnail_url = thumb_upload.get("secure_url") or thumb_upload.get("url")
         await clip.save()
-    except Exception:
+    except Exception as exc:
         clip.status = ClipStatus.ERROR
         await clip.save()
-        raise
+        raise exc
     finally:
         clip_file = Path(clip_output_path)
         thumb_file = Path(thumbnail_output_path)
@@ -139,4 +140,5 @@ async def _process_clip(project_id: str, clip_id: str) -> dict:
 
 @celery_app.task(name="create_clip_task")
 def create_clip_task(project_id: str, clip_id: str):
-    return async_to_sync(_process_clip)(project_id, clip_id)
+    loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
+    return loop.run_until_complete(_process_clip(project_id, clip_id))
