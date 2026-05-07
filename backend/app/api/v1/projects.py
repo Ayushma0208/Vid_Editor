@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
@@ -11,11 +12,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api.dependencies import get_current_user_id
+from app.config import settings
 from app.models.asset import Asset
 from app.models.caption import Caption
-from app.models.clip import Clip
+from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project, ProjectStatus
-from app.tasks.download_task import download_video_task
+from app.tasks.download_task import _run_download_pipeline, _set_project_error, download_video_task
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -28,6 +30,10 @@ YOUTUBE_URL_PATTERN = re.compile(
 
 class CreateProjectRequest(BaseModel):
     yt_url: str
+
+
+class SeedDummyProjectRequest(BaseModel):
+    file_name: str
 
 
 def serialize_document(doc: Any) -> dict[str, Any]:
@@ -47,15 +53,41 @@ def parse_video_id(yt_url: str) -> str:
     return ""
 
 
+def normalize_youtube_url(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    host = parsed.netloc.lower()
+    query = parse_qs(parsed.query)
+
+    if "youtu.be" in host:
+        video_id = parsed.path.strip("/").split("/")[0]
+        return f"https://youtu.be/{video_id}" if video_id else raw_url
+
+    if "youtube.com" in host:
+        video_id = query.get("v", [""])[0]
+        if video_id:
+            return f"https://www.youtube.com/watch?v={video_id}"
+
+    return raw_url
+
+
 async def fetch_yt_metadata(yt_url: str) -> dict[str, Any]:
     process = await asyncio.create_subprocess_exec(
         "yt-dlp",
+        "--no-playlist",
         "--dump-json",
         yt_url,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await process.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Timed out while fetching YouTube metadata. Please try a direct video URL.",
+        )
 
     if process.returncode != 0:
         raise HTTPException(
@@ -79,12 +111,77 @@ async def fetch_yt_metadata(yt_url: str) -> dict[str, Any]:
         ) from exc
 
 
+async def probe_local_video_duration(video_path: Path) -> float | None:
+    process = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate()
+    if process.returncode != 0:
+        return None
+    try:
+        return float(stdout.decode().strip())
+    except ValueError:
+        return None
+
+
+async def generate_local_thumbnail(video_path: Path, output_path: Path) -> bool:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-ss",
+        "2",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        str(output_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await process.communicate()
+    return process.returncode == 0 and output_path.exists()
+
+
+async def _run_download_pipeline_background(project_id: str, video_url: str) -> None:
+    project = await Project.get(project_id)
+    if not project:
+        return
+    try:
+        await _run_download_pipeline(project_id, video_url)
+    except Exception as exc:
+        await _set_project_error(project, str(exc))
+
+
+async def trigger_download(project_id: str, video_url: str) -> dict[str, Any]:
+    try:
+        task = download_video_task.delay(project_id, video_url)
+        inspector = await asyncio.to_thread(download_video_task.app.control.inspect, timeout=0.5)
+        ping = await asyncio.to_thread(inspector.ping) if inspector else None
+        if ping:
+            return {"task_id": task.id, "execution_mode": "celery"}
+    except Exception:
+        pass
+
+    asyncio.create_task(_run_download_pipeline_background(project_id, video_url))
+    return {"task_id": None, "execution_mode": "local-background"}
+
+
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: CreateProjectRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    yt_url = payload.yt_url.strip()
+    yt_url = normalize_youtube_url(payload.yt_url.strip())
     if not YOUTUBE_URL_PATTERN.match(yt_url):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -110,9 +207,87 @@ async def create_project(
     )
     await project.insert()
 
-    task = download_video_task.delay(str(project.id), yt_url)
     response = serialize_document(project)
-    response["task_id"] = task.id
+    trigger = await trigger_download(str(project.id), yt_url)
+    response["task_id"] = trigger["task_id"]
+    response["execution_mode"] = trigger["execution_mode"]
+    return response
+
+
+@router.post("/seed-dummy", status_code=status.HTTP_201_CREATED)
+async def seed_dummy_project(
+    payload: SeedDummyProjectRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    raw_file_name = payload.file_name.strip()
+    if not raw_file_name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="file_name is required")
+
+    now = datetime.now(timezone.utc)
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", raw_file_name.lower()).strip("-") or "dummy-project"
+    local_video_path = Path(raw_file_name)
+    if not local_video_path.is_absolute():
+        local_video_path = Path.cwd() / raw_file_name
+    if not local_video_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Seed video not found: {raw_file_name}")
+
+    duration = await probe_local_video_duration(local_video_path)
+    thumbnail_path = Path(settings.temp_dir) / "seed" / slug / "thumbnail.jpg"
+    thumbnail_created = await generate_local_thumbnail(local_video_path, thumbnail_path)
+
+    project = Project(
+        user_id=user_id,
+        title=f"Seed: {raw_file_name}",
+        yt_url=f"local://{raw_file_name}",
+        yt_video_id=f"seed-{slug[:30]}",
+        status=ProjectStatus.READY,
+        cloudinary_folder=f"projects/seed/{slug}/",
+        local_video_path=str(local_video_path),
+        duration_seconds=duration,
+        thumbnail_url=None,
+        metadata={
+            "seed_file_name": raw_file_name,
+            "seeded": True,
+            "local_thumbnail_path": str(thumbnail_path) if thumbnail_created else None,
+        },
+        created_at=now,
+        updated_at=now,
+    )
+    await project.insert()
+
+    default_clips = [
+        {
+            "label": "Intro segment",
+            "start_time": 0.0,
+            "end_time": 30.0,
+            "clip_type": ClipType.THIRTY_SECONDS,
+        },
+        {
+            "label": "Main explanation",
+            "start_time": 30.0,
+            "end_time": 60.0,
+            "clip_type": ClipType.THIRTY_SECONDS,
+        },
+    ]
+
+    for clip_data in default_clips:
+        clip = Clip(
+            project_id=str(project.id),
+            user_id=user_id,
+            label=clip_data["label"],
+            start_time=clip_data["start_time"],
+            end_time=clip_data["end_time"],
+            duration=clip_data["end_time"] - clip_data["start_time"],
+            clip_type=clip_data["clip_type"],
+            status=ClipStatus.READY,
+            created_at=now,
+        )
+        await clip.insert()
+
+    response = serialize_document(project)
+    response["thumbnail_url"] = f"/api/v1/projects/{response['id']}/thumbnail"
+    response["seeded"] = True
+    response["seed_file_name"] = raw_file_name
     return response
 
 
@@ -152,9 +327,10 @@ async def retry_download(project_id: str, user_id: str = Depends(get_current_use
     project.metadata = metadata
     await project.save()
 
-    task = download_video_task.delay(str(project.id), project.yt_url)
     data = serialize_document(project)
-    data["task_id"] = task.id
+    trigger = await trigger_download(str(project.id), project.yt_url)
+    data["task_id"] = trigger["task_id"]
+    data["execution_mode"] = trigger["execution_mode"]
     return data
 
 
@@ -209,3 +385,38 @@ async def stream_video(project_id: str, token: str = ""):
         media_type="video/mp4",
         filename=f"{project.title or 'video'}.mp4",
     )
+
+
+@router.get("/{project_id}/thumbnail")
+async def stream_thumbnail(project_id: str, token: str = ""):
+    from jose import JWTError, jwt as jose_jwt
+    from app.config import settings as app_settings
+
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token required")
+
+    try:
+        payload = jose_jwt.decode(token, app_settings.jwt_secret_key, algorithms=[app_settings.jwt_algorithm])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    metadata = project.metadata or {}
+    thumb_path = metadata.get("local_thumbnail_path")
+    if not thumb_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail not available")
+    thumbnail = Path(thumb_path)
+    if not thumbnail.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail file not found")
+
+    return FileResponse(path=str(thumbnail), media_type="image/jpeg", filename=f"{project.title or 'thumbnail'}.jpg")

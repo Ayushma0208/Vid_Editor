@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 1440
     temp_dir: str = "/tmp/videoedit"
     frontend_url: str = "http://localhost:3000"
+    yt_dlp_cookies_file: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

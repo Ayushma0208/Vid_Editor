@@ -116,6 +116,15 @@ async def save_project_asset(
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    existing_asset = await Asset.find_one(
+        Asset.project_id == project_id,
+        Asset.user_id == user_id,
+        Asset.source == payload.source,
+        Asset.source_id == payload.source_id,
+    )
+    if existing_asset:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This image is already saved in the gallery.")
+
     asset = Asset(
         project_id=project_id,
         user_id=user_id,

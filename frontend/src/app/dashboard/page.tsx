@@ -12,6 +12,7 @@ type ProjectItem = {
   thumbnail_url?: string | null
   duration_seconds?: number | null
   created_at?: string
+  metadata?: Record<string, unknown> | null
 }
 
 function formatDuration(totalSeconds?: number | null) {
@@ -38,8 +39,10 @@ export default function DashboardPage() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [ytUrl, setYtUrl] = useState("")
   const [isCreating, setIsCreating] = useState(false)
+  const [isSeeding, setIsSeeding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [retrying, setRetrying] = useState<Set<string>>(new Set())
+  const [deleting, setDeleting] = useState<Set<string>>(new Set())
 
   const loadProjects = useCallback(async () => {
     try {
@@ -97,8 +100,9 @@ export default function DashboardPage() {
       setYtUrl("")
       setIsModalOpen(false)
       await loadProjects()
-    } catch {
-      setError("Could not create project. Make sure the YouTube URL is valid.")
+    } catch (err: unknown) {
+      const apiError = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(apiError || "Could not create project. Make sure the YouTube URL is valid.")
     } finally {
       setIsCreating(false)
     }
@@ -125,6 +129,40 @@ export default function DashboardPage() {
     const id = project.id || project._id
     if (!id) return
     router.push(`/project/${id}/clips`)
+  }
+
+  const handleDeleteProject = async (e: React.MouseEvent, projectId: string) => {
+    e.stopPropagation()
+    if (!window.confirm("Delete this project permanently?")) return
+    setDeleting((prev) => new Set(prev).add(projectId))
+    setError(null)
+    try {
+      await api.delete(`/api/v1/projects/${projectId}`)
+      await loadProjects()
+    } catch {
+      setError("Could not delete project.")
+    } finally {
+      setDeleting((prev) => {
+        const next = new Set(prev)
+        next.delete(projectId)
+        return next
+      })
+    }
+  }
+
+  const handleSeedDummyProject = async () => {
+    setIsSeeding(true)
+    setError(null)
+    try {
+      await api.post("/api/v1/projects/seed-dummy", {
+        file_name: "Javascript in 1 shot in Hindi  part 1-854x480-avc1-mp4a.mp4",
+      })
+      await loadProjects()
+    } catch {
+      setError("Could not seed dummy project.")
+    } finally {
+      setIsSeeding(false)
+    }
   }
 
   return (
@@ -157,12 +195,21 @@ export default function DashboardPage() {
             <h1 className="text-2xl font-bold">Dashboard Home</h1>
             <p className="text-sm text-[#434655]">Manage your projects and import new videos.</p>
           </div>
-          <button
-            onClick={() => setIsModalOpen(true)}
-            className="rounded-lg bg-gradient-to-r from-[#004ac6] to-[#712ae2] px-5 py-2 text-sm font-medium text-white shadow-[0_4px_14px_0_rgba(0,74,198,0.39)] hover:opacity-90"
-          >
-            New Project
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSeedDummyProject}
+              disabled={isSeeding}
+              className="rounded-lg border border-[#c3c6d7] bg-white px-5 py-2 text-sm font-medium text-[#191b23] shadow-sm hover:bg-[#f7f7fe] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isSeeding ? "Seeding..." : "Seed Dummy Project"}
+            </button>
+            <button
+              onClick={() => setIsModalOpen(true)}
+              className="rounded-lg bg-gradient-to-r from-[#004ac6] to-[#712ae2] px-5 py-2 text-sm font-medium text-white shadow-[0_4px_14px_0_rgba(0,74,198,0.39)] hover:opacity-90"
+            >
+              New Project
+            </button>
+          </div>
         </div>
 
         <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -194,8 +241,15 @@ export default function DashboardPage() {
               const id = project.id || project._id || ""
               const st = (project.status || "pending").toLowerCase()
               const badge = statusBadge(st)
-              const isRetryable = st === "pending" || st === "error"
+              const isRetryable = st === "error"
               const isRetryingThis = retrying.has(id)
+              const isDeletingThis = deleting.has(id)
+              const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
+              const seededThumbnailUrl =
+                id && token
+                  ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/projects/${id}/thumbnail?token=${token}`
+                  : null
+              const cardThumbnailUrl = project.thumbnail_url || (project.metadata?.seeded ? seededThumbnailUrl : null)
 
               return (
                 <article
@@ -204,9 +258,9 @@ export default function DashboardPage() {
                   className="cursor-pointer rounded-xl border border-[#e1e2ed] bg-white p-3 shadow-sm transition-all hover:border-[#004ac6]/40 hover:shadow-md"
                 >
                   <div className="relative mb-3 aspect-video overflow-hidden rounded-lg bg-[#ededf9]">
-                    {project.thumbnail_url ? (
+                    {cardThumbnailUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={project.thumbnail_url} alt={project.title || "Project"} className="h-full w-full object-cover" />
+                      <img src={cardThumbnailUrl} alt={project.title || "Project"} className="h-full w-full object-cover" />
                     ) : (
                       <div className="flex h-full items-center justify-center text-sm text-[#737686]">No thumbnail</div>
                     )}
@@ -215,19 +269,28 @@ export default function DashboardPage() {
                     </div>
                   </div>
                   <h3 className="line-clamp-2 text-sm font-medium">{project.title || "Untitled Project"}</h3>
-                  <div className="mt-2 flex items-center justify-between">
+                  <div className="mt-2 flex items-center justify-between gap-2">
                     <span className={`inline-block rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${badge.className}`}>
                       {badge.label}
                     </span>
-                    {isRetryable && (
+                    <div className="flex items-center gap-2">
+                      {isRetryable && (
+                        <button
+                          onClick={(e) => handleRetryDownload(e, id)}
+                          disabled={isRetryingThis || isDeletingThis}
+                          className="rounded-md bg-[#004ac6] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#0053db] disabled:opacity-50"
+                        >
+                          {isRetryingThis ? "Retrying…" : "Retry Download"}
+                        </button>
+                      )}
                       <button
-                        onClick={(e) => handleRetryDownload(e, id)}
-                        disabled={isRetryingThis}
-                        className="rounded-md bg-[#004ac6] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#0053db] disabled:opacity-50"
+                        onClick={(e) => handleDeleteProject(e, id)}
+                        disabled={isDeletingThis || isRetryingThis}
+                        className="rounded-md border border-red-200 px-3 py-1 text-[11px] font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
                       >
-                        {isRetryingThis ? "Retrying…" : "Retry Download"}
+                        {isDeletingThis ? "Deleting…" : "Delete"}
                       </button>
-                    )}
+                    </div>
                   </div>
                 </article>
               )
