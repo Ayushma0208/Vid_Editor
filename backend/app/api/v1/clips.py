@@ -1,4 +1,6 @@
+import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,7 +11,7 @@ from app.api.dependencies import get_current_user_id
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
-from app.tasks.clip_task import create_clip_task
+from app.tasks.clip_task import create_clip_task, run_clip_processing
 
 
 router = APIRouter(tags=["clips"])
@@ -47,6 +49,12 @@ def validate_clip_window(payload: CreateClipRequest, project_duration_seconds: f
     if payload.clip_type == ClipType.SIXTY_SECONDS and not (55 <= duration <= 65):
         raise HTTPException(status_code=422, detail="60s clip must be between 55 and 65 seconds")
 
+    if payload.clip_type == ClipType.CUSTOM and not (30 <= duration <= 60):
+        raise HTTPException(
+            status_code=422,
+            detail="Custom social snips must be between 30 and 60 seconds",
+        )
+
     if project_duration_seconds is not None and payload.end_time > project_duration_seconds:
         raise HTTPException(status_code=422, detail="end_time cannot exceed project duration_seconds")
 
@@ -60,6 +68,14 @@ async def create_project_clip(
     project = await Project.get(project_id)
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    has_local = bool(project.local_video_path and Path(project.local_video_path).is_file())
+    has_cloud_raw = bool(project.cloudinary_raw_url)
+    if not has_local and not has_cloud_raw:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Video file is not available yet for clipping",
+        )
 
     validate_clip_window(payload, project.duration_seconds)
 
@@ -76,9 +92,22 @@ async def create_project_clip(
     )
     await clip.insert()
 
-    task = create_clip_task.delay(project_id, str(clip.id))
+    clip_id_str = str(clip.id)
     response = serialize_document(clip)
-    response["task_id"] = task.id
+    try:
+        inspector = await asyncio.to_thread(create_clip_task.app.control.inspect, timeout=0.5)
+        ping = await asyncio.to_thread(inspector.ping) if inspector else None
+        if ping:
+            task = create_clip_task.delay(project_id, clip_id_str)
+            response["task_id"] = task.id
+            response["execution_mode"] = "celery"
+            return response
+    except Exception:
+        pass
+
+    asyncio.create_task(run_clip_processing(project_id, clip_id_str))
+    response["task_id"] = None
+    response["execution_mode"] = "local-background"
     return response
 
 

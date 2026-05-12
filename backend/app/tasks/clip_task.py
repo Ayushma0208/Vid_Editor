@@ -22,8 +22,13 @@ def get_cache_lock():
     return _cache_lock
 
 async def _acquire_raw_video(project: Project, project_id: str) -> str:
+    if project.local_video_path:
+        local_path = Path(project.local_video_path)
+        if local_path.is_file():
+            return str(local_path.resolve())
+
     if not project.cloudinary_raw_url:
-        raise RuntimeError("Project raw video URL is missing")
+        raise RuntimeError("Project has no local video file and no Cloudinary raw URL")
 
     async with get_cache_lock():
         cached = _raw_video_cache.get(project_id)
@@ -79,7 +84,7 @@ async def _generate_thumbnail(input_path: str, output_path: str, mid_point: floa
     return output_path
 
 
-async def _process_clip(project_id: str, clip_id: str) -> dict:
+async def run_clip_processing(project_id: str, clip_id: str) -> dict:
     project = await Project.get(PydanticObjectId(project_id))
     clip = await Clip.get(PydanticObjectId(clip_id))
     if not project or not clip:
@@ -141,4 +146,4 @@ async def _process_clip(project_id: str, clip_id: str) -> dict:
 @celery_app.task(name="create_clip_task")
 def create_clip_task(project_id: str, clip_id: str):
     loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
-    return loop.run_until_complete(_process_clip(project_id, clip_id))
+    return loop.run_until_complete(run_clip_processing(project_id, clip_id))

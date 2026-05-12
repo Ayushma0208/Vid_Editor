@@ -1,6 +1,6 @@
 "use client"
 
-import { FormEvent, useCallback, useEffect, useState } from "react"
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import api from "@/lib/api"
 
@@ -18,6 +18,8 @@ type ProjectData = {
   metadata?: Record<string, unknown> | null
 }
 
+type ClipTypeApi = "30s" | "60s" | "custom"
+
 type ClipData = {
   id?: string
   _id?: string
@@ -25,9 +27,13 @@ type ClipData = {
   start_time?: number
   end_time?: number
   duration?: number
+  clip_type?: ClipTypeApi
   status?: string
   cloudinary_clip_url?: string | null
   thumbnail_url?: string | null
+  publish_status?: string | null
+  publish_platform?: string | null
+  published_url?: string | null
 }
 
 type AssetResult = {
@@ -77,6 +83,24 @@ function statusBadge(status: string) {
   return { label: "Pending", className: "bg-amber-100 text-amber-700" }
 }
 
+function inferClipType(duration: number): ClipTypeApi {
+  if (duration >= 25 && duration <= 35) return "30s"
+  if (duration >= 55 && duration <= 65) return "60s"
+  return "custom"
+}
+
+/** Backend allows ~30s (25–35), ~60s (55–65), or custom social snip (30–60). */
+function snipValidationMessage(duration: number): string | null {
+  if (duration < 1) return "End time must be after start time."
+  const okShort = duration >= 25 && duration <= 35
+  const okLong = duration >= 55 && duration <= 65
+  const okCustom = duration >= 30 && duration <= 60
+  if (okShort || okLong || okCustom) return null
+  if (duration < 25) return "Clip is too short. Try the 30s preset from your start mark, or widen the range."
+  if (duration > 65) return "Clip is too long. Maximum is 65 seconds (60s preset window)."
+  return "Adjust timing to 30–60s for flexible snips, or use the ~30s / ~60s preset bands."
+}
+
 export default function ProjectClipsPage() {
   const params = useParams()
   const router = useRouter()
@@ -102,6 +126,15 @@ export default function ProjectClipsPage() {
   const [selectedCaptionClipId, setSelectedCaptionClipId] = useState<string>("")
   const [captionText, setCaptionText] = useState("")
   const [isSavingCaption, setIsSavingCaption] = useState(false)
+
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [videoMetaDuration, setVideoMetaDuration] = useState<number | null>(null)
+  const [snipStart, setSnipStart] = useState(0)
+  const [snipEnd, setSnipEnd] = useState(30)
+  const [snipLabel, setSnipLabel] = useState("")
+  const [creatingSnip, setCreatingSnip] = useState(false)
+  const [snipMessage, setSnipMessage] = useState<string | null>(null)
+  const [publishingClipId, setPublishingClipId] = useState<string | null>(null)
 
   const loadSavedAssets = useCallback(async () => {
     try {
@@ -154,6 +187,21 @@ export default function ProjectClipsPage() {
     const interval = setInterval(loadProject, 5000)
     return () => clearInterval(interval)
   }, [project?.status, loadProject])
+
+  const hasClipsInFlight = clips.some((c) => {
+    const s = (c.status || "").toLowerCase()
+    return s === "pending" || s === "processing"
+  })
+  useEffect(() => {
+    if (!hasClipsInFlight) return
+    const interval = setInterval(loadProject, 4000)
+    return () => clearInterval(interval)
+  }, [hasClipsInFlight, loadProject])
+
+  const maxVideoSeconds =
+    videoMetaDuration ??
+    (typeof project?.duration_seconds === "number" ? project.duration_seconds : null) ??
+    undefined
 
   const handleRetry = async () => {
     setRetrying(true)
@@ -274,6 +322,78 @@ export default function ProjectClipsPage() {
     }
   }
 
+  const markSnipStartFromPlayer = () => {
+    const t = videoRef.current?.currentTime ?? 0
+    setSnipStart(t)
+    setSnipMessage(null)
+  }
+
+  const markSnipEndFromPlayer = () => {
+    const t = videoRef.current?.currentTime ?? 0
+    setSnipEnd(t)
+    setSnipMessage(null)
+  }
+
+  const applySnipLengthFromStart = (length: number) => {
+    const cap = maxVideoSeconds ?? length
+    const end = Math.min(snipStart + length, cap)
+    setSnipEnd(end)
+    if (end <= snipStart) {
+      setSnipMessage("Not enough video left from this start point for that length.")
+    } else {
+      setSnipMessage(null)
+    }
+  }
+
+  const handleCreateSnip = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const start = Math.min(snipStart, snipEnd)
+    const end = Math.max(snipStart, snipEnd)
+    const duration = end - start
+    const invalid = snipValidationMessage(duration)
+    if (invalid) {
+      setSnipMessage(invalid)
+      return
+    }
+    setCreatingSnip(true)
+    setSnipMessage(null)
+    try {
+      await api.post(`/api/v1/projects/${projectId}/clips`, {
+        start_time: start,
+        end_time: end,
+        clip_type: inferClipType(duration),
+        label: snipLabel.trim() || null,
+      })
+      setSnipMessage("Snip created — encoding and upload running…")
+      setSnipLabel("")
+      await loadProject()
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string | { msg?: string }[] } } })?.response?.data?.detail
+      const msg =
+        typeof detail === "string"
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d) => d.msg).join(", ")
+            : "Could not create snip."
+      setSnipMessage(msg)
+    } finally {
+      setCreatingSnip(false)
+    }
+  }
+
+  const handlePublishClip = async (clipId: string, platform: "youtube" | "instagram") => {
+    setPublishingClipId(`${platform}:${clipId}`)
+    setError(null)
+    try {
+      await api.post(`/api/v1/clips/${clipId}/publish/${platform}`)
+      await loadProject()
+    } catch {
+      setError(`Could not queue ${platform} publish. Connect the account under Publishing if you have not yet.`)
+    } finally {
+      setPublishingClipId(null)
+    }
+  }
+
   const handleDeleteCaption = async (captionId: string) => {
     setError(null)
     try {
@@ -356,11 +476,16 @@ export default function ProjectClipsPage() {
           {st === "ready" && (project.local_video_path || project.cloudinary_raw_url) ? (
             <div className="overflow-hidden rounded-xl border border-[#e1e2ed] bg-black shadow-lg">
               <video
+                ref={videoRef}
                 controls
                 preload="metadata"
                 poster={project.thumbnail_url || undefined}
-                className="w-full aspect-video"
+                className="aspect-video w-full"
                 src={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/projects/${projectId}/stream?token=${typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""}`}
+                onLoadedMetadata={(event) => {
+                  const d = event.currentTarget.duration
+                  if (Number.isFinite(d) && d > 0) setVideoMetaDuration(d)
+                }}
               >
                 Your browser does not support the video tag.
               </video>
@@ -394,13 +519,120 @@ export default function ProjectClipsPage() {
           )}
         </div>
 
+        {st === "ready" && (project.local_video_path || project.cloudinary_raw_url) ? (
+          <section className="mb-8 rounded-xl border border-[#e1e2ed] bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-bold text-[#191b23]">Social snip tool</h2>
+            <p className="mt-1 text-xs text-[#5e6172]">
+              Mark start and end while you watch, or use quick lengths (30–60s). Processed snips can be queued to YouTube or Instagram from each card below.
+            </p>
+            <form onSubmit={handleCreateSnip} className="mt-4 space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={markSnipStartFromPlayer}
+                  className="rounded-lg border border-[#d4d7e8] bg-[#fcfcff] px-3 py-2 text-sm font-medium text-[#191b23] hover:bg-[#f0f2ff]"
+                >
+                  Set start to playhead
+                </button>
+                <button
+                  type="button"
+                  onClick={markSnipEndFromPlayer}
+                  className="rounded-lg border border-[#d4d7e8] bg-[#fcfcff] px-3 py-2 text-sm font-medium text-[#191b23] hover:bg-[#f0f2ff]"
+                >
+                  Set end to playhead
+                </button>
+                <span className="self-center text-xs text-[#737686]">Presets from start:</span>
+                <button
+                  type="button"
+                  onClick={() => applySnipLengthFromStart(30)}
+                  className="rounded-lg bg-[#191b23] px-3 py-2 text-sm font-medium text-white hover:bg-[#2d3044]"
+                >
+                  30s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applySnipLengthFromStart(45)}
+                  className="rounded-lg bg-[#191b23] px-3 py-2 text-sm font-medium text-white hover:bg-[#2d3044]"
+                >
+                  45s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applySnipLengthFromStart(60)}
+                  className="rounded-lg bg-[#191b23] px-3 py-2 text-sm font-medium text-white hover:bg-[#2d3044]"
+                >
+                  60s
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <label className="block text-xs font-medium text-[#434655]">
+                  Start (seconds)
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={Number.isFinite(snipStart) ? snipStart : 0}
+                    onChange={(event) => setSnipStart(Number(event.target.value))}
+                    className="mt-1 w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="block text-xs font-medium text-[#434655]">
+                  End (seconds)
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={Number.isFinite(snipEnd) ? snipEnd : 0}
+                    onChange={(event) => setSnipEnd(Number(event.target.value))}
+                    className="mt-1 w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="block text-xs font-medium text-[#434655] sm:col-span-2">
+                  Label (optional)
+                  <input
+                    type="text"
+                    value={snipLabel}
+                    onChange={(event) => setSnipLabel(event.target.value)}
+                    placeholder="e.g. TikTok hook"
+                    className="mt-1 w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-[#5e6172]">
+                  <span className="font-semibold text-[#191b23]">Selected length:</span>{" "}
+                  {formatDuration(Math.abs(snipEnd - snipStart))}{" "}
+                  <span className="text-[#9a9eb0]">
+                    ({formatDuration(Math.min(snipStart, snipEnd))} → {formatDuration(Math.max(snipStart, snipEnd))})
+                  </span>
+                  {maxVideoSeconds ? (
+                    <span className="ml-2 text-[#9a9eb0]">· video ~{formatDuration(maxVideoSeconds)}</span>
+                  ) : null}
+                </div>
+                <button
+                  type="submit"
+                  disabled={creatingSnip}
+                  className="rounded-lg bg-[#004ac6] px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-[#0053db] disabled:opacity-50"
+                >
+                  {creatingSnip ? "Creating snip…" : "Create snip"}
+                </button>
+              </div>
+              {snipMessage ? (
+                <p className={`text-sm ${snipMessage.includes("encoding") || snipMessage.includes("Created") ? "text-emerald-700" : "text-amber-800"}`}>
+                  {snipMessage}
+                </p>
+              ) : null}
+            </form>
+          </section>
+        ) : null}
+
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.4fr_1fr]">
           <section>
             <h2 className="mb-4 text-lg font-bold">Clips</h2>
             {clips.length === 0 ? (
               <div className="rounded-xl border border-dashed border-[#c3c6d7] bg-white p-8 text-center text-sm text-[#434655]">
                 {st === "ready"
-                  ? "No clips yet. Use the editor to create clips from this video."
+                  ? "No clips yet. Use Social snip tool above to cut 30–60s segments for social posts."
                   : "Clips will be available once the video download is complete."}
               </div>
             ) : (
@@ -436,6 +668,50 @@ export default function ProjectClipsPage() {
                       <span className={`mt-1 inline-block rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${clipBadge.className}`}>
                         {clipBadge.label}
                       </span>
+                      {clip.clip_type ? (
+                        <p className="mt-1 text-[11px] uppercase tracking-wide text-[#9a9eb0]">Type: {clip.clip_type}</p>
+                      ) : null}
+                      {clip.status === "ready" && clip.cloudinary_clip_url ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <a
+                            href={clip.cloudinary_clip_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="rounded-lg border border-[#d4d7e8] px-2.5 py-1.5 text-[11px] font-medium text-[#004ac6] hover:bg-[#f6f7ff]"
+                          >
+                            Open / download
+                          </a>
+                          <button
+                            type="button"
+                            disabled={publishingClipId !== null}
+                            onClick={() => handlePublishClip(clipId, "youtube")}
+                            className="rounded-lg border border-[#d4d7e8] px-2.5 py-1.5 text-[11px] font-medium hover:bg-[#f6f7ff] disabled:opacity-50"
+                          >
+                            {publishingClipId === `youtube:${clipId}` ? "Queueing…" : "Post to YouTube"}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={publishingClipId !== null}
+                            onClick={() => handlePublishClip(clipId, "instagram")}
+                            className="rounded-lg border border-[#d4d7e8] px-2.5 py-1.5 text-[11px] font-medium hover:bg-[#f6f7ff] disabled:opacity-50"
+                          >
+                            {publishingClipId === `instagram:${clipId}` ? "Queueing…" : "Post to Instagram"}
+                          </button>
+                        </div>
+                      ) : null}
+                      {clip.published_url ? (
+                        <a
+                          href={clip.published_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-block text-[11px] font-medium text-emerald-700 underline"
+                        >
+                          View published ({clip.publish_platform || "link"})
+                        </a>
+                      ) : null}
+                      {clip.publish_status && clip.publish_status !== "published" ? (
+                        <p className="mt-1 text-[11px] text-[#6b6f82]">Publish: {clip.publish_status}</p>
+                      ) : null}
                     </div>
                   )
                 })}
