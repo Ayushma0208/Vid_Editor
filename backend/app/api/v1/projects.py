@@ -1,22 +1,23 @@
 import asyncio
-import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.api.dependencies import get_current_user_id
+from app.api.dependencies import get_current_user_id, resolve_user_id_from_token
 from app.config import settings
 from app.models.asset import Asset
 from app.models.caption import Caption
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project, ProjectStatus
+from app.services.ytdlp_service import YTDLPService
+from app.tasks.clip_task import auto_generate_clips_task
 from app.tasks.download_task import _run_download_pipeline, _set_project_error, download_video_task
 
 
@@ -68,47 +69,6 @@ def normalize_youtube_url(raw_url: str) -> str:
             return f"https://www.youtube.com/watch?v={video_id}"
 
     return raw_url
-
-
-async def fetch_yt_metadata(yt_url: str) -> dict[str, Any]:
-    process = await asyncio.create_subprocess_exec(
-        "yt-dlp",
-        "--no-playlist",
-        "--dump-json",
-        yt_url,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Timed out while fetching YouTube metadata. Please try a direct video URL.",
-        )
-
-    if process.returncode != 0:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Failed to parse YouTube metadata: {stderr.decode().strip()}",
-        )
-
-    raw_output = stdout.decode().strip()
-    if not raw_output:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="yt-dlp returned empty metadata",
-        )
-
-    try:
-        return json.loads(raw_output.splitlines()[0])
-    except (json.JSONDecodeError, IndexError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Unable to decode yt-dlp metadata",
-        ) from exc
 
 
 async def probe_local_video_duration(video_path: Path) -> float | None:
@@ -188,20 +148,33 @@ async def create_project(
             detail="Invalid YouTube URL. Use youtube.com/watch?v=... or youtu.be/...",
         )
 
-    metadata = await fetch_yt_metadata(yt_url)
+    metadata: dict[str, Any] = {}
+    metadata_error: str | None = None
+    try:
+        metadata = await YTDLPService().get_metadata(yt_url)
+    except Exception as exc:
+        metadata_error = str(exc)
+
     parsed_video_id = parse_video_id(yt_url) or str(metadata.get("id", ""))
     now = datetime.now(timezone.utc)
 
+    title = metadata.get("title") if metadata else None
+    if metadata_error and not title:
+        title = "Untitled video"
+
     project = Project(
         user_id=user_id,
-        title=metadata.get("title") or "Untitled video",
+        title=title or "Untitled video",
         yt_url=yt_url,
         yt_video_id=parsed_video_id,
         status=ProjectStatus.PENDING,
         cloudinary_folder=f"projects/{parsed_video_id or 'unknown'}/",
         duration_seconds=metadata.get("duration"),
         thumbnail_url=metadata.get("thumbnail"),
-        metadata=metadata,
+        metadata={
+            **metadata,
+            **({"metadata_fetch_error": metadata_error} if metadata_error else {}),
+        },
         created_at=now,
         updated_at=now,
     )
@@ -334,6 +307,41 @@ async def retry_download(project_id: str, user_id: str = Depends(get_current_use
     return data
 
 
+@router.post("/{project_id}/generate-clips")
+async def generate_clips(
+    project_id: str,
+    user_id: str = Depends(get_current_user_id),
+    segment_seconds: int = 30,
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if project.status != ProjectStatus.READY:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project must be ready before generating clips",
+        )
+
+    local_path = Path(project.local_video_path) if project.local_video_path else None
+    if not local_path or not local_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Downloaded video file is not available on the server",
+        )
+
+    if segment_seconds not in (30, 60):
+        segment_seconds = settings.default_clip_duration_seconds
+
+    task = auto_generate_clips_task.delay(project_id, segment_seconds)
+    return {
+        "project_id": project_id,
+        "task_id": task.id,
+        "segment_seconds": segment_seconds,
+        "message": f"Generating {segment_seconds}s clips for the full video",
+    }
+
+
 @router.delete("/{project_id}")
 async def delete_project(project_id: str, user_id: str = Depends(get_current_user_id)):
     project = await Project.get(project_id)
@@ -349,25 +357,9 @@ async def delete_project(project_id: str, user_id: str = Depends(get_current_use
 
 
 @router.get("/{project_id}/stream")
-async def stream_video(project_id: str, token: str = ""):
-    """Stream the raw video file. Accepts ?token=<jwt> for auth since <video> tags can't send headers."""
-    from jose import JWTError, jwt as jose_jwt
-    from app.config import settings as app_settings
-
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token required")
-
-    try:
-        payload = jose_jwt.decode(token, app_settings.jwt_secret_key, algorithms=[app_settings.jwt_algorithm])
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-    if payload.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+async def stream_video(project_id: str, request: Request, token: str = ""):
+    """Stream the raw video file. Accepts ?token=<jwt> or Authorization: Bearer."""
+    user_id = resolve_user_id_from_token(token, request)
 
     project = await Project.get(project_id)
     if not project or project.user_id != user_id:
@@ -388,24 +380,8 @@ async def stream_video(project_id: str, token: str = ""):
 
 
 @router.get("/{project_id}/thumbnail")
-async def stream_thumbnail(project_id: str, token: str = ""):
-    from jose import JWTError, jwt as jose_jwt
-    from app.config import settings as app_settings
-
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token required")
-
-    try:
-        payload = jose_jwt.decode(token, app_settings.jwt_secret_key, algorithms=[app_settings.jwt_algorithm])
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-    if payload.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
-
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+async def stream_thumbnail(project_id: str, request: Request, token: str = ""):
+    user_id = resolve_user_id_from_token(token, request)
 
     project = await Project.get(project_id)
     if not project or project.user_id != user_id:

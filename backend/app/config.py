@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
     temp_dir: str = "/tmp/videoedit"
+    default_clip_duration_seconds: int = 30
+    ad_clip_path: str = ""
+    default_ad_duration_seconds: int = 10
     frontend_url: str = "http://localhost:3000"
     yt_dlp_cookies_file: str = ""
 

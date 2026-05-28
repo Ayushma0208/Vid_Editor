@@ -7,6 +7,7 @@ import api from "@/lib/api"
 // ── Types ──────────────────────────────────────────────────────────────────
 type ProjectData = {
   id?: string; _id?: string; title?: string; status?: string
+  download_status?: string
   cloudinary_raw_url?: string | null; local_video_path?: string | null
   video_url?: string | null; thumbnail_url?: string | null
   duration_seconds?: number | null; yt_url?: string; yt_video_id?: string
@@ -34,6 +35,13 @@ type SidePanel = "captions" | "broll" | "templates"
 type FontEntry = { label: string; family: string }
 type VideoLoadState = "idle" | "cloudinary" | "fetching" | "ready" | "error"
 type CaptionMode = "global" | "per_clip"
+
+function getApiErrorDetail(err: unknown, fallback: string): string {
+  const detail = (err as { response?: { data?: { detail?: string | { msg?: string }[] } } })?.response?.data?.detail
+  if (typeof detail === "string") return detail
+  if (Array.isArray(detail) && detail[0]?.msg) return detail[0].msg
+  return fallback
+}
 
 // ── 166 FONTS ────────────────────────────────────────────────────────────
 const FONT_CATEGORIES: { label: string; fonts: FontEntry[] }[] = [
@@ -482,8 +490,20 @@ export default function VideoEditor() {
   const [isDeletingSelected, setIsDeletingSelected] = useState(false)
   const [deletingAssetId,    setDeletingAssetId]    = useState<string | null>(null)
   const [selectedTemplate,   setSelectedTemplate]   = useState<string | null>(null)
+  const [isRetryingDownload, setIsRetryingDownload] = useState(false)
 
-  const isYT = !!(project && !project.cloudinary_raw_url && !project.video_url && project.yt_video_id)
+  const projectStatus = (project?.download_status || project?.status || "").toLowerCase()
+  const isYT = !!(
+    project &&
+    !project.cloudinary_raw_url &&
+    !project.video_url &&
+    project.yt_video_id &&
+    projectStatus !== "ready" &&
+    !project.local_video_path
+  )
+  const videoReadyForClipping = !isYT && projectStatus !== "pending" && projectStatus !== "downloading" && projectStatus !== "error"
+  const downloadErrorMessage =
+    typeof project?.metadata?.error_message === "string" ? project.metadata.error_message : null
 
   useEffect(() => () => { if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current) }, [])
 
@@ -518,16 +538,51 @@ export default function VideoEditor() {
     loadProject(); loadCaptions(); loadSavedAssets()
   }, [loadProject, loadCaptions, loadSavedAssets, router, projectId])
 
+  useEffect(() => {
+    if (!projectStatus || videoReadyForClipping) return
+    const timer = window.setInterval(() => { loadProject() }, 5000)
+    return () => window.clearInterval(timer)
+  }, [projectStatus, videoReadyForClipping, loadProject])
+
+  useEffect(() => {
+    const hasInProgress = clips.some((c) => {
+      const s = (c.status || "").toLowerCase()
+      return s === "processing" || s === "pending"
+    })
+    if (!hasInProgress) return
+    const interval = window.setInterval(loadProject, 5000)
+    return () => window.clearInterval(interval)
+  }, [clips, loadProject])
+
+  const handleRetryDownload = async () => {
+    setIsRetryingDownload(true); setError(null)
+    try {
+      await api.post(`/api/v1/projects/${projectId}/retry-download`)
+      await loadProject()
+    } catch (err: unknown) {
+      setError(getApiErrorDetail(err, "Could not retry download."))
+    } finally { setIsRetryingDownload(false) }
+  }
+
   const fetchVideoAsBlob = useCallback(async () => {
     setVideoLoadState("fetching"); setVideoErrorMsg(null)
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null
+    if (!token) {
+      setVideoErrorMsg("Authentication failed. Please log in again.")
+      setVideoLoadState("error")
+      return
+    }
     try {
-      const res = await api.get(`/api/v1/projects/${projectId}/stream`, { responseType: "blob" })
+      const res = await api.get(
+        `/api/v1/projects/${projectId}/stream?token=${encodeURIComponent(token)}`,
+        { responseType: "blob" },
+      )
       const url = URL.createObjectURL(new Blob([res.data], { type: "video/mp4" }))
       if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current)
       blobUrlRef.current = url; setVideoBlobUrl(url); setVideoLoadState("ready")
     } catch (err: unknown) {
       const s = (err as { response?: { status?: number } })?.response?.status
-      if (s === 401 || s === 403) setVideoErrorMsg("Authentication failed.")
+      if (s === 401 || s === 403) setVideoErrorMsg("Authentication failed. Please log in again.")
       else if (s === 404)         setVideoErrorMsg("Video file not found on server.")
       else                        setVideoErrorMsg("Could not load video. Check backend is running.")
       setVideoLoadState("error")
@@ -537,7 +592,9 @@ export default function VideoEditor() {
   useEffect(() => {
     if (!project || videoLoadState !== "idle") return
     const cloudUrl = project.cloudinary_raw_url || project.video_url
+    const status = (project.download_status || project.status || "").toLowerCase()
     if (cloudUrl) { setVideoLoadState("cloudinary"); setVideoBlobUrl(cloudUrl) }
+    else if (status === "ready" || project.local_video_path) { fetchVideoAsBlob() }
     else if (project.yt_video_id) {
       const orig = typeof window !== "undefined" ? encodeURIComponent(window.location.origin) : ""
       setVideoBlobUrl(`https://www.youtube-nocookie.com/embed/${project.yt_video_id}?rel=0&modestbranding=1&enablejsapi=1&origin=${orig}`)
@@ -552,7 +609,9 @@ export default function VideoEditor() {
     setVideoLoadState("idle"); setVideoBlobUrl(null); setVideoErrorMsg(null)
     if (!project) return
     const cloudUrl = project.cloudinary_raw_url || project.video_url
+    const status = (project.download_status || project.status || "").toLowerCase()
     if (cloudUrl) { setVideoLoadState("cloudinary"); setVideoBlobUrl(cloudUrl) }
+    else if (status === "ready" || project.local_video_path) { fetchVideoAsBlob() }
     else if (project.yt_video_id) {
       const orig = typeof window !== "undefined" ? encodeURIComponent(window.location.origin) : ""
       setVideoBlobUrl(`https://www.youtube-nocookie.com/embed/${project.yt_video_id}?rel=0&modestbranding=1&enablejsapi=1&origin=${orig}`)
@@ -648,42 +707,44 @@ export default function VideoEditor() {
     return null
   }, [clips, duration])
 
-  // ── CREATE CLIP ── pre-checks locally, never hits a 409 blind
+  // ── SPLIT FULL VIDEO ── creates all clips at once (30s or 60s segments)
   const handleCreateClip = async () => {
     if (!clipDuration)  { setError("Select 30s or 60s first."); return }
     if (duration === 0) { setError("Timeline not loaded yet."); return }
-
-    // Local overlap check first
-    if (selectionOverlaps(selStart, clipDuration)) {
-      const next = findNextFree(clipDuration, selStart + clipDuration)
-      if (next !== null) {
-        setSelStart(next)
-        setError(`That segment is taken. Selection moved to ${fmtTime(next)}–${fmtTime(next + clipDuration)}. Click Create Clip again.`)
+    if (!videoReadyForClipping) {
+      if (projectStatus === "error") {
+        setError("Video download failed. Retry download before creating clips.")
       } else {
-        setError("No free segment found. Remove some clips or try the other duration.")
+        setError("Video is still downloading to the server. Wait until it is ready, then try again.")
       }
       return
     }
 
+    const estimatedCount = Math.max(1, Math.ceil(duration / clipDuration))
+    if (clips.length > 0) {
+      const ok = window.confirm(
+        `This replaces ${clips.length} existing clip${clips.length !== 1 ? "s" : ""} and splits the full video into about ${estimatedCount} clips of ${clipDuration}s each. Continue?`,
+      )
+      if (!ok) return
+    }
+
     setIsCreatingClip(true); setError(null)
     try {
-      await api.post(`/api/v1/projects/${projectId}/clips`, {
-        start_time: selStart,
-        end_time:   selStart + clipDuration,
-        clip_type:  `${clipDuration}s`,
+      await api.post(`/api/v1/projects/${projectId}/generate-clips`, null, {
+        params: { segment_seconds: clipDuration },
       })
       await loadProject()
-      setCreateSuccess(true); setTimeout(() => setCreateSuccess(false), 2500)
-      const next = findNextFree(clipDuration, selStart + clipDuration)
-      if (next !== null) setSelStart(next)
+      setCreateSuccess(true); setTimeout(() => setCreateSuccess(false), 6000)
     } catch (err: unknown) {
+      const detail = getApiErrorDetail(err, "")
       const status = (err as { response?: { status?: number } })?.response?.status
-      if (status === 409) {
-        await loadProject()
-        const next = findNextFree(clipDuration, selStart + clipDuration)
-        if (next !== null) { setSelStart(next); setError(`Server rejected. Moved to ${fmtTime(next)}–${fmtTime(next + clipDuration)}. Click again.`) }
-        else setError("All segments taken. Remove existing clips to free space.")
-      } else { setError("Could not create clip. Please try again.") }
+      if (status === 409 && detail.toLowerCase().includes("not available")) {
+        setError("Video file is not on the server yet. Wait for download to finish or retry download.")
+      } else if (status === 409) {
+        setError(detail || "Project must be ready before generating clips.")
+      } else {
+        setError(detail || "Could not start clip generation. Please try again.")
+      }
     } finally { setIsCreatingClip(false) }
   }
 
@@ -764,6 +825,12 @@ export default function VideoEditor() {
   const selPctWidth  = duration > 0 && clipDuration !== null ? (clipDuration / duration) * 100 : 0
   const playheadPct  = duration > 0 ? (currentTime / duration) * 100 : 0
   const tickInterval = duration > 600 ? 60 : duration > 120 ? 30 : 10
+  const estimatedClipCount = clipDuration && duration > 0 ? Math.max(1, Math.ceil(duration / clipDuration)) : 0
+  const readyClipCount = clips.filter((c) => (c.status || "").toLowerCase() === "ready").length
+  const processingClipCount = clips.filter((c) => {
+    const s = (c.status || "").toLowerCase()
+    return s === "processing" || s === "pending"
+  }).length
   const filteredFonts = fontSearch.trim() ? ALL_FONTS.filter(f => f.label.toLowerCase().includes(fontSearch.toLowerCase())) : null
   const captionBgWithAlpha = captionBgColor + Math.round(captionBgOpacity * 255).toString(16).padStart(2, "0")
 
@@ -794,13 +861,38 @@ export default function VideoEditor() {
             </div>
           )}
           {createSuccess && <span className="text-xs text-emerald-500 font-semibold">✓ Clip created!</span>}
-          <button onClick={handleCreateClip} disabled={isCreatingClip || !clipDuration}
-            title={!clipDuration ? "Select 30s or 60s first" : `Create ${clipDuration}s clip`}
+          <button onClick={handleCreateClip} disabled={isCreatingClip || !clipDuration || !videoReadyForClipping}
+            title={
+              !clipDuration ? "Select 30s or 60s first"
+              : !videoReadyForClipping ? "Wait for the video to finish downloading to the server"
+              : `Create ${clipDuration}s clip`
+            }
             className="rounded-lg bg-[#1a73e8] px-4 py-1.5 text-xs font-semibold text-white hover:bg-[#1557b0] disabled:opacity-50 disabled:cursor-not-allowed transition-all">
             {isCreatingClip ? "Creating…" : clipDuration ? `Create Clip (${clipDuration}s)` : "Create Clip"}
           </button>
         </div>
       </header>
+
+      {!videoReadyForClipping && (
+        <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-amber-200 bg-amber-50 text-amber-900 flex-shrink-0">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold">
+              {projectStatus === "error" ? "Video download failed" : "Video is downloading to the server"}
+            </p>
+            <p className="text-[11px] text-amber-800 truncate">
+              {projectStatus === "error"
+                ? (downloadErrorMessage || "Clips can only be created after the source video is saved locally.")
+                : "You can preview via YouTube now, but clip creation needs the downloaded file. This page refreshes automatically."}
+            </p>
+          </div>
+          {projectStatus === "error" && (
+            <button onClick={handleRetryDownload} disabled={isRetryingDownload}
+              className="rounded-md border border-amber-300 bg-white px-3 py-1 text-[11px] font-semibold hover:bg-amber-100 disabled:opacity-50 flex-shrink-0">
+              {isRetryingDownload ? "Retrying…" : "Retry download"}
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-1 min-h-0">
 

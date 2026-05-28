@@ -49,6 +49,20 @@ function formatTime(s?: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`
 }
 
+function apiBaseUrl() {
+  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+}
+
+function clipStreamUrl(projectId: string, clipId: string, token: string) {
+  return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/stream?token=${encodeURIComponent(token)}`
+}
+
+function clipThumbnailUrl(projectId: string, clipId: string, token: string, cloudinaryUrl?: string | null) {
+  if (cloudinaryUrl) return cloudinaryUrl
+  if (!token) return null
+  return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/thumbnail?token=${encodeURIComponent(token)}`
+}
+
 function statusBadge(status: string) {
   const s = status.toLowerCase()
   if (s === "ready") return { label: "Ready", dot: "#10b981", className: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" }
@@ -117,11 +131,15 @@ function ClipModal({
   const badge = statusBadge(clip.status || "pending")
   const [isDeleting, setIsDeleting] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const isReady = (clip.status || "").toLowerCase() === "ready"
 
-  // Determine video source — cloudinary first, then stream fallback
   const videoSrc = clip.cloudinary_clip_url
     ? clip.cloudinary_clip_url
-    : `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/projects/${projectId}/clips/${clipId}/stream?token=${token}`
+    : isReady
+      ? clipStreamUrl(projectId, clipId, token)
+      : ""
+
+  const posterUrl = clipThumbnailUrl(projectId, clipId, token, clip.thumbnail_url)
 
   // Download handler
   const handleDownload = () => {
@@ -214,13 +232,13 @@ function ClipModal({
 
         {/* Video player */}
         <div className="bg-slate-100">
-          {clip.status === "ready" ? (
+          {clip.status === "ready" && videoSrc ? (
             <video
               ref={videoRef}
               src={videoSrc}
               controls
               autoPlay
-              poster={clip.thumbnail_url || undefined}
+              poster={posterUrl || undefined}
               className="w-full max-h-[440px] object-contain"
             />
           ) : (
@@ -268,6 +286,7 @@ export default function ProjectClipsPage() {
 
   const [selectedClip, setSelectedClip] = useState<ClipData | null>(null)
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
+  const [isGenerating, setIsGenerating] = useState(false)
 
   const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
 
@@ -308,6 +327,20 @@ export default function ProjectClipsPage() {
     setClips((prev) => prev.filter((c) => (c.id || c._id) !== clipId))
   }
 
+  const handleGenerateClips = async (segmentSeconds: 30 | 60 = 30) => {
+    setIsGenerating(true); setError(null)
+    try {
+      await api.post(`/api/v1/projects/${projectId}/generate-clips`, null, {
+        params: { segment_seconds: segmentSeconds },
+      })
+      await loadProject()
+    } catch {
+      setError("Could not start clip generation. Make sure the video is Ready.")
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
   // ── Loading ──
   if (loading) {
     return (
@@ -335,6 +368,8 @@ export default function ProjectClipsPage() {
   const projectBadge = statusBadge(projectStatus)
 
   const readyCount = clips.filter((c) => (c.status || "").toLowerCase() === "ready").length
+  const errorCount = clips.filter((c) => (c.status || "").toLowerCase() === "error").length
+  const canGenerate = projectStatus === "ready"
 
   return (
     <div
@@ -361,14 +396,34 @@ export default function ProjectClipsPage() {
           </span>
         </div>
 
-        {/* Open Editor button */}
-        <button
-          onClick={() => router.push(`/project/${projectId}/editor`)}
-          className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] px-4 py-1.5 text-xs font-semibold text-white shadow-lg shadow-[#5b6ef5]/20 hover:opacity-90 transition-all flex-shrink-0"
-        >
-          <EditIcon />
-          Open Editor
-        </button>
+        {/* Actions */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {canGenerate && (
+            <>
+              <button
+                onClick={() => handleGenerateClips(30)}
+                disabled={isGenerating}
+                className="rounded-lg border border-[#5b6ef5]/30 bg-[#5b6ef5]/10 px-3 py-1.5 text-xs font-semibold text-[#5b6ef5] hover:bg-[#5b6ef5]/20 disabled:opacity-50 transition-all"
+              >
+                {isGenerating ? "Generating…" : "Split into 30s"}
+              </button>
+              <button
+                onClick={() => handleGenerateClips(60)}
+                disabled={isGenerating}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-all"
+              >
+                60s
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => router.push(`/project/${projectId}/editor`)}
+            className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] px-4 py-1.5 text-xs font-semibold text-white shadow-lg shadow-[#5b6ef5]/20 hover:opacity-90 transition-all"
+          >
+            <EditIcon />
+            Open Editor
+          </button>
+        </div>
       </header>
 
       {/* ── MAIN ── */}
@@ -380,8 +435,8 @@ export default function ProjectClipsPage() {
             <h1 className="text-2xl font-bold text-slate-900">Clips</h1>
             <p className="mt-1 text-sm text-slate-600">
               {clips.length === 0
-                ? "No clips yet — open the editor to create some"
-                : `${clips.length} clip${clips.length !== 1 ? "s" : ""} · ${readyCount} ready`}
+                ? "Import complete — split the full video into 30s or 60s clips"
+                : `${clips.length} clip${clips.length !== 1 ? "s" : ""} · ${readyCount} ready${errorCount ? ` · ${errorCount} error` : ""}`}
             </p>
           </div>
           {/* Stats pills */}
@@ -398,6 +453,21 @@ export default function ProjectClipsPage() {
             </div>
           )}
         </div>
+
+        {errorCount > 0 && canGenerate && (
+          <div className="mb-6 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm text-amber-700">
+              {errorCount} clip{errorCount !== 1 ? "s" : ""} failed earlier (Cloudinary was unavailable). Click &quot;Split into 30s&quot; to regenerate them.
+            </p>
+            <button
+              onClick={() => handleGenerateClips(30)}
+              disabled={isGenerating}
+              className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+            >
+              Regenerate
+            </button>
+          </div>
+        )}
 
         {error && (
           <div className="mb-6 flex items-center justify-between rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
@@ -416,15 +486,17 @@ export default function ProjectClipsPage() {
             </div>
             <p className="text-sm font-medium text-[#6b6e84]">No clips yet</p>
             <p className="mt-1 text-xs text-[#3a3d52]">
-              Open the editor to create your first clip from this video
+              Click Split into 30s to divide the full video automatically
             </p>
-            <button
-              onClick={() => router.push(`/project/${projectId}/editor`)}
-              className="mt-5 flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-300/40 hover:opacity-90 transition-all"
-            >
-              <EditIcon />
-              Open Editor
-            </button>
+            {canGenerate && (
+              <button
+                onClick={() => handleGenerateClips(30)}
+                disabled={isGenerating}
+                className="mt-5 flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-300/40 hover:opacity-90 disabled:opacity-50 transition-all"
+              >
+                {isGenerating ? "Generating…" : "Split into 30s clips"}
+              </button>
+            )}
           </div>
         ) : (
           /* ── CLIPS GRID ── */
@@ -434,6 +506,8 @@ export default function ProjectClipsPage() {
               const badge = statusBadge(clip.status || "pending")
               const isHovered = hoveredCard === clipId
               const isReady = (clip.status || "").toLowerCase() === "ready"
+              const thumbUrl = clipThumbnailUrl(projectId, clipId, token, clip.thumbnail_url)
+              const previewUrl = clip.cloudinary_clip_url || (isReady ? clipStreamUrl(projectId, clipId, token) : null)
 
               return (
                 <article
@@ -445,18 +519,18 @@ export default function ProjectClipsPage() {
                 >
                   {/* Thumbnail */}
                   <div className="relative aspect-video bg-slate-100 overflow-hidden">
-                    {isReady && clip.cloudinary_clip_url ? (
+                    {isReady && previewUrl ? (
                       <video
                         preload="metadata"
-                        poster={clip.thumbnail_url || undefined}
+                        poster={thumbUrl || undefined}
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]"
-                        src={clip.cloudinary_clip_url}
+                        src={previewUrl}
                         muted
                       />
-                    ) : clip.thumbnail_url ? (
+                    ) : thumbUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={clip.thumbnail_url}
+                        src={thumbUrl}
                         alt={clip.label || "Clip"}
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]"
                       />

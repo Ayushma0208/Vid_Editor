@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 from app.config import settings
@@ -9,7 +10,9 @@ class YTDLPService:
     @staticmethod
     async def _run_yt_dlp(args: list[str]) -> tuple[int, bytes, bytes]:
         process = await asyncio.create_subprocess_exec(
-            "yt-dlp",
+            sys.executable,
+            "-m",
+            "yt_dlp",
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

@@ -117,7 +117,7 @@ export default function DashboardPage() {
       return s === "downloading" || s === "pending"
     })
     if (!hasInProgress) return
-    const interval = setInterval(loadProjects, 10000)
+    const interval = setInterval(loadProjects, 3000)
     return () => clearInterval(interval)
   }, [projects, loadProjects])
 
@@ -133,11 +133,12 @@ export default function DashboardPage() {
     setIsCreating(true); setError(null)
     try {
       await api.post("/api/v1/projects/", { yt_url: ytUrl.trim() })
-      setYtUrl(""); setIsModalOpen(false)
+      setYtUrl("")
+      setIsModalOpen(false)
       await loadProjects()
     } catch (err: unknown) {
       const apiError = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      setError(apiError || "Could not create project.")
+      setError(typeof apiError === "string" ? apiError : "Could not start import. Is the backend running?")
     } finally { setIsCreating(false) }
   }
 
@@ -563,7 +564,7 @@ export default function DashboardPage() {
             <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
               <div>
                 <h2 className="text-base font-bold text-white">Import from YouTube</h2>
-                <p className="mt-0.5 text-xs text-[#5a5d72]">Paste a YouTube URL to start a new project</p>
+                <p className="mt-0.5 text-xs text-[#5a5d72]">Paste a YouTube URL — the video downloads to the server, then you can cut 30s or 60s clips in the editor</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="flex h-7 w-7 items-center justify-center rounded-lg text-[#4a4d60] hover:bg-white/[0.06] hover:text-[#c8cad8] transition-all">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

@@ -1,4 +1,5 @@
 from beanie import init_beanie
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING
 
@@ -10,7 +11,7 @@ from app.models.project import Project
 from app.models.user import User
 
 
-client = AsyncIOMotorClient(settings.mongodb_uri)
+client = AsyncIOMotorClient(settings.mongodb_uri, tlsCAFile=certifi.where())
 database = client[settings.mongodb_db_name]
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,7 +10,28 @@ from app.celery_worker import celery_app
 import app.celery_worker as cw
 from app.config import settings
 from app.models.project import Project, ProjectStatus
+from app.services.ffmpeg_service import FfmpegService
 from app.services.ytdlp_service import YTDLPService
+from app.tasks.clip_task import auto_generate_clips_task
+
+
+def _ffmpeg_missing_message() -> str:
+    return (
+        "FFmpeg/ffprobe is not installed or not on PATH. "
+        "Install FFmpeg (e.g. winget install Gyan.FFmpeg), restart your terminals, then click Retry."
+    )
+
+
+def _is_ffmpeg_missing_error(exc: Exception) -> bool:
+    if isinstance(exc, FileNotFoundError):
+        return True
+    message = str(exc).lower()
+    return "cannot find the file" in message or "winerror 2" in message
+
+
+def _ffmpeg_available() -> bool:
+    return shutil.which("ffprobe") is not None and shutil.which("ffmpeg") is not None
+
 
 async def _set_project_error(project: Project, error_message: str) -> None:
     metadata = project.metadata or {}
@@ -18,6 +40,37 @@ async def _set_project_error(project: Project, error_message: str) -> None:
     project.status = ProjectStatus.ERROR
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
+
+
+async def _enrich_project_from_download(
+    project: Project,
+    video_url: str,
+    local_video_path: str,
+) -> None:
+    ytdlp_service = YTDLPService()
+
+    try:
+        metadata = await ytdlp_service.get_metadata(video_url)
+        if metadata.get("title"):
+            project.title = str(metadata["title"])
+        if metadata.get("duration"):
+            project.duration_seconds = float(metadata["duration"])
+        if metadata.get("thumbnail"):
+            project.thumbnail_url = str(metadata["thumbnail"])
+        stored = project.metadata or {}
+        stored.update(metadata)
+        stored.pop("metadata_fetch_error", None)
+        project.metadata = stored
+    except Exception as exc:
+        metadata = project.metadata or {}
+        metadata["metadata_fetch_error"] = str(exc)
+        project.metadata = metadata
+
+    if not project.duration_seconds and _ffmpeg_available():
+        duration = await FfmpegService().probe_duration(local_video_path)
+        if duration:
+            project.duration_seconds = duration
+
 
 async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
     project = await Project.get(PydanticObjectId(project_id))
@@ -29,28 +82,39 @@ async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
     await project.save()
 
     ytdlp_service = YTDLPService()
-
     output_template = str(Path(settings.temp_dir) / project_id / "raw_video.%(ext)s")
-    
+
     local_video_path = await ytdlp_service.download_video(
         url=video_url,
         output_path=output_template,
         quality="1080p",
     )
 
-    # Save the local file path and mark as ready — no Cloudinary upload needed
-    project.status = ProjectStatus.READY
     project.local_video_path = local_video_path
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+    await _enrich_project_from_download(project, video_url, local_video_path)
+
     metadata = project.metadata or {}
     metadata.pop("error_message", None)
+    metadata.pop("auto_clip_warning", None)
+
+    project.status = ProjectStatus.READY
+    project.local_video_path = local_video_path
     project.metadata = metadata
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
+
+    if _ffmpeg_available():
+        auto_generate_clips_task.delay(project_id, settings.default_clip_duration_seconds)
 
     return {
         "project_id": project_id,
         "status": project.status.value,
         "local_video_path": project.local_video_path,
+        "title": project.title,
+        "duration_seconds": project.duration_seconds,
     }
 
 
@@ -66,7 +130,10 @@ def download_video_task(self, project_id: str, video_url: str):
         async def _mark_error() -> None:
             project = await Project.get(PydanticObjectId(project_id))
             if project:
-                await _set_project_error(project, str(exc))
+                message = str(exc)
+                if _is_ffmpeg_missing_error(exc):
+                    message = _ffmpeg_missing_message()
+                await _set_project_error(project, message)
 
         if cw.worker_loop is None:
             loop = asyncio.get_event_loop()

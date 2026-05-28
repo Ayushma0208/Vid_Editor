@@ -3,11 +3,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.api.dependencies import get_current_user_id
+from app.api.dependencies import get_current_user_id, resolve_user_id_from_token
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
@@ -121,6 +122,52 @@ async def list_project_clips(project_id: str, user_id: str = Depends(get_current
     return [serialize_document(clip) for clip in clips]
 
 
+@router.get("/projects/{project_id}/clips/{clip_id}/stream")
+async def stream_project_clip(project_id: str, clip_id: str, request: Request, token: str = ""):
+    user_id = resolve_user_id_from_token(token, request)
+    clip = await Clip.get(clip_id)
+    if not clip or clip.project_id != project_id or clip.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+
+    if clip.cloudinary_clip_url:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=clip.cloudinary_clip_url)
+
+    if not clip.local_clip_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not available")
+
+    clip_path = Path(clip.local_clip_path)
+    if not clip_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not found on disk")
+
+    return FileResponse(
+        path=str(clip_path),
+        media_type="video/mp4",
+        filename=f"{clip.label or clip_id}.mp4",
+    )
+
+
+@router.get("/projects/{project_id}/clips/{clip_id}/thumbnail")
+async def stream_project_clip_thumbnail(project_id: str, clip_id: str, request: Request, token: str = ""):
+    user_id = resolve_user_id_from_token(token, request)
+    clip = await Clip.get(clip_id)
+    if not clip or clip.project_id != project_id or clip.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+
+    if clip.thumbnail_url:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=clip.thumbnail_url)
+
+    if not clip.local_thumbnail_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail not available")
+
+    thumb_path = Path(clip.local_thumbnail_path)
+    if not thumb_path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail file not found on disk")
+
+    return FileResponse(path=str(thumb_path), media_type="image/jpeg")
+
+
 @router.get("/clips/{clip_id}")
 async def get_clip(clip_id: str, user_id: str = Depends(get_current_user_id)):
     clip = await Clip.get(clip_id)
@@ -155,15 +202,27 @@ async def delete_clip(clip_id: str, user_id: str = Depends(get_current_user_id))
 
     cloudinary_service = CloudinaryService()
     if clip.cloudinary_public_id:
-        await cloudinary_service.delete_resource(clip.cloudinary_public_id, resource_type="video")
-    await cloudinary_service.delete_by_prefix(
-        f"projects/{clip.project_id}/clips/{clip_id}",
-        resource_type="video",
-    )
-    await cloudinary_service.delete_by_prefix(
-        f"projects/{clip.project_id}/clips/{clip_id}_thumb",
-        resource_type="image",
-    )
+        try:
+            await cloudinary_service.delete_resource(clip.cloudinary_public_id, resource_type="video")
+        except Exception:
+            pass
+        try:
+            await cloudinary_service.delete_by_prefix(
+                f"projects/{clip.project_id}/clips/{clip_id}",
+                resource_type="video",
+            )
+            await cloudinary_service.delete_by_prefix(
+                f"projects/{clip.project_id}/clips/{clip_id}_thumb",
+                resource_type="image",
+            )
+        except Exception:
+            pass
+
+    for path_str in (clip.local_clip_path, clip.local_thumbnail_path):
+        if path_str:
+            path = Path(path_str)
+            if path.is_file():
+                path.unlink()
 
     await clip.delete()
     return {"deleted": True, "clip_id": clip_id}

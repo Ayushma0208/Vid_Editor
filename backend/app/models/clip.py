@@ -30,6 +30,8 @@ class Clip(Document):
     cloudinary_clip_url: str | None = None
     cloudinary_public_id: str | None = None
     thumbnail_url: str | None = None
+    local_clip_path: str | None = None
+    local_thumbnail_path: str | None = None
     publish_task_id: str | None = None
     publish_platform: str | None = None
     publish_status: str | None = None
