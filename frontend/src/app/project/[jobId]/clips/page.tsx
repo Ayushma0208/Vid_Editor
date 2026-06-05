@@ -287,6 +287,7 @@ export default function ProjectClipsPage() {
   const [selectedClip, setSelectedClip] = useState<ClipData | null>(null)
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [isRetrying, setIsRetrying] = useState(false)
 
   const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
 
@@ -312,22 +313,39 @@ export default function ProjectClipsPage() {
     loadProject()
   }, [loadProject, router, projectId])
 
-  // Poll if any clips are still processing
+  // Poll while project is processing or clips are in progress
   useEffect(() => {
-    const hasInProgress = clips.some((c) => {
+    const projectBusy = ["downloading", "pending"].includes((project?.status || "").toLowerCase())
+    const clipsBusy = clips.some((c) => {
       const s = (c.status || "").toLowerCase()
       return s === "processing" || s === "pending"
     })
-    if (!hasInProgress) return
+    if (!projectBusy && !clipsBusy) return
     const interval = setInterval(loadProject, 5000)
     return () => clearInterval(interval)
-  }, [clips, loadProject])
+  }, [clips, project?.status, loadProject])
 
   const handleClipDeleted = (clipId: string) => {
     setClips((prev) => prev.filter((c) => (c.id || c._id) !== clipId))
   }
 
-  const handleGenerateClips = async (segmentSeconds: 30 | 60 = 30) => {
+  const SEGMENT_50_SEC = 50
+
+  const handleRetryProcessing = async () => {
+    setIsRetrying(true)
+    setError(null)
+    try {
+      await api.post(`/api/v1/projects/${projectId}/retry-processing`)
+      await loadProject()
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(typeof detail === "string" ? detail : "Could not retry processing.")
+    } finally {
+      setIsRetrying(false)
+    }
+  }
+
+  const handleGenerateClips = async (segmentSeconds: number = SEGMENT_50_SEC) => {
     setIsGenerating(true); setError(null)
     try {
       await api.post(`/api/v1/projects/${projectId}/generate-clips`, null, {
@@ -369,7 +387,19 @@ export default function ProjectClipsPage() {
 
   const readyCount = clips.filter((c) => (c.status || "").toLowerCase() === "ready").length
   const errorCount = clips.filter((c) => (c.status || "").toLowerCase() === "error").length
-  const canGenerate = projectStatus === "ready"
+  const isProcessingUpload = projectStatus === "downloading" || projectStatus === "pending"
+  const isUpload = project.metadata?.source === "upload"
+  const rawError =
+    typeof project.metadata?.error_message === "string" ? project.metadata.error_message.trim() : ""
+  const rawWarning =
+    typeof project.metadata?.auto_clip_warning === "string" ? project.metadata.auto_clip_warning.trim() : ""
+  const processingError =
+    rawError ||
+    rawWarning ||
+    (projectStatus === "error"
+      ? "Video processing failed. Install FFmpeg, restart the backend, then click Retry processing."
+      : null)
+  const canGenerate = projectStatus === "ready" && !isProcessingUpload
 
   return (
     <div
@@ -398,23 +428,23 @@ export default function ProjectClipsPage() {
 
         {/* Actions */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          {projectStatus === "error" && isUpload && (
+            <button
+              onClick={handleRetryProcessing}
+              disabled={isRetrying}
+              className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-500/20 disabled:opacity-50 transition-all"
+            >
+              {isRetrying ? "Retrying…" : "Retry processing"}
+            </button>
+          )}
           {canGenerate && (
-            <>
-              <button
-                onClick={() => handleGenerateClips(30)}
-                disabled={isGenerating}
-                className="rounded-lg border border-[#5b6ef5]/30 bg-[#5b6ef5]/10 px-3 py-1.5 text-xs font-semibold text-[#5b6ef5] hover:bg-[#5b6ef5]/20 disabled:opacity-50 transition-all"
-              >
-                {isGenerating ? "Generating…" : "Split into 30s"}
-              </button>
-              <button
-                onClick={() => handleGenerateClips(60)}
-                disabled={isGenerating}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-all"
-              >
-                60s
-              </button>
-            </>
+            <button
+              onClick={() => handleGenerateClips(SEGMENT_50_SEC)}
+              disabled={isGenerating}
+              className="rounded-lg border border-[#5b6ef5]/30 bg-[#5b6ef5]/10 px-3 py-1.5 text-xs font-semibold text-[#5b6ef5] hover:bg-[#5b6ef5]/20 disabled:opacity-50 transition-all"
+            >
+              {isGenerating ? "Generating…" : "Split into 50s clips"}
+            </button>
           )}
           <button
             onClick={() => router.push(`/project/${projectId}/editor`)}
@@ -434,8 +464,10 @@ export default function ProjectClipsPage() {
           <div>
             <h1 className="text-2xl font-bold text-slate-900">Clips</h1>
             <p className="mt-1 text-sm text-slate-600">
-              {clips.length === 0
-                ? "Import complete — split the full video into 30s or 60s clips"
+              {isProcessingUpload
+                ? "Processing your video — this can take several minutes for large files…"
+                : clips.length === 0
+                ? "Upload complete — split the full video into 50-second clips"
                 : `${clips.length} clip${clips.length !== 1 ? "s" : ""} · ${readyCount} ready${errorCount ? ` · ${errorCount} error` : ""}`}
             </p>
           </div>
@@ -454,13 +486,19 @@ export default function ProjectClipsPage() {
           )}
         </div>
 
+        {processingError && (
+          <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
+            <p className="text-sm text-red-700">{processingError}</p>
+          </div>
+        )}
+
         {errorCount > 0 && canGenerate && (
           <div className="mb-6 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
             <p className="text-sm text-amber-700">
-              {errorCount} clip{errorCount !== 1 ? "s" : ""} failed earlier (Cloudinary was unavailable). Click &quot;Split into 30s&quot; to regenerate them.
+              {errorCount} clip{errorCount !== 1 ? "s" : ""} failed earlier. Click &quot;Split into 50s clips&quot; to regenerate them.
             </p>
             <button
-              onClick={() => handleGenerateClips(30)}
+              onClick={() => handleGenerateClips(SEGMENT_50_SEC)}
               disabled={isGenerating}
               className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
             >
@@ -486,15 +524,26 @@ export default function ProjectClipsPage() {
             </div>
             <p className="text-sm font-medium text-[#6b6e84]">No clips yet</p>
             <p className="mt-1 text-xs text-[#3a3d52]">
-              Click Split into 30s to divide the full video automatically
+              {projectStatus === "error"
+                ? "Fix the error above, then retry or upload again"
+                : "Clips are created automatically after upload, or click below to split again"}
             </p>
+            {projectStatus === "error" && isUpload && (
+              <button
+                onClick={handleRetryProcessing}
+                disabled={isRetrying}
+                className="mt-5 flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-5 py-2 text-xs font-semibold text-red-600 hover:bg-red-500/20 disabled:opacity-50 transition-all"
+              >
+                {isRetrying ? "Retrying…" : "Retry processing"}
+              </button>
+            )}
             {canGenerate && (
               <button
-                onClick={() => handleGenerateClips(30)}
+                onClick={() => handleGenerateClips(SEGMENT_50_SEC)}
                 disabled={isGenerating}
                 className="mt-5 flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-300/40 hover:opacity-90 disabled:opacity-50 transition-all"
               >
-                {isGenerating ? "Generating…" : "Split into 30s clips"}
+                {isGenerating ? "Generating…" : "Split into 50s clips"}
               </button>
             )}
           </div>

@@ -71,10 +71,10 @@ export default function LoginPage() {
           <div className="mb-2 flex items-center gap-2">
             <div className="h-6 w-1 bg-[#2563eb]" />
             <h1 className={`${syne.className} m-0 text-4xl font-extrabold tracking-tight`}>
-              CLIP<span className="text-[#2563eb]">AI</span>
+              Movie <span className="text-[#2563eb]">Clips</span>
             </h1>
           </div>
-          <p className="m-0 text-sm text-[#434655]">Professional video editing, simplified.</p>
+          <p className="m-0 text-sm text-[#434655]">Upload long videos — get 50-second clips automatically.</p>
         </div>
 
         <form className="space-y-6" onSubmit={onSubmit}>

@@ -7,8 +7,8 @@ import QueryProvider from "@/components/layout/QueryProvider"
 const inter = Inter({ subsets: ["latin"] })
  
 export const metadata: Metadata = {
-  title: "ClipAI — Turn long videos into viral shorts",
-  description: "AI-powered video repurposing platform",
+  title: "Movie Clips — Split long videos into 50-second clips",
+  description: "Upload long videos and automatically cut them into 50-second clips",
 }
  
 export default function RootLayout({ children }: { children: React.ReactNode }) {

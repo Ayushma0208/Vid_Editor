@@ -82,7 +82,8 @@ export default function DashboardPage() {
   const [projects, setProjects] = useState<ProjectItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isModalOpen, setIsModalOpen] = useState(false)
-  const [ytUrl, setYtUrl] = useState("")
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploadProgress, setUploadProgress] = useState(0)
   const [isCreating, setIsCreating] = useState(false)
   const [isSeeding, setIsSeeding] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -127,18 +128,31 @@ export default function DashboardPage() {
     ready: projects.filter((p) => (p.status || "").toLowerCase() === "ready").length,
   }), [projects])
 
-  const handleCreateProject = async (event: FormEvent<HTMLFormElement>) => {
+  const handleUploadProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!ytUrl.trim()) return
-    setIsCreating(true); setError(null)
+    if (!uploadFile) return
+    setIsCreating(true); setError(null); setUploadProgress(0)
     try {
-      await api.post("/api/v1/projects/", { yt_url: ytUrl.trim() })
-      setYtUrl("")
+      const formData = new FormData()
+      formData.append("file", uploadFile)
+      await api.post("/api/v1/uploads", formData, {
+        timeout: 0,
+        onUploadProgress: (e) => {
+          if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total))
+        },
+      })
+      setUploadFile(null)
+      setUploadProgress(0)
       setIsModalOpen(false)
       await loadProjects()
     } catch (err: unknown) {
-      const apiError = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      setError(typeof apiError === "string" ? apiError : "Could not start import. Is the backend running?")
+      const res = (err as { response?: { status?: number; data?: { detail?: string } } })?.response
+      const apiError = res?.data?.detail
+      if (res?.status === 405) {
+        setError("Upload API not available. Restart the backend server and try again.")
+      } else {
+        setError(typeof apiError === "string" ? apiError : "Could not upload video. Is the backend running?")
+      }
     } finally { setIsCreating(false) }
   }
 
@@ -236,7 +250,7 @@ export default function DashboardPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
                 </svg>
               </div>
-              <span className="text-[15px] font-bold tracking-tight text-slate-900">Clip<span className="text-[#7c8df8]">AI</span></span>
+              <span className="text-[15px] font-bold tracking-tight text-slate-900">Movie <span className="text-[#7c8df8]">Clips</span></span>
             </div>
           ) : (
             <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-[#5b6ef5] to-[#8b5cf6]">
@@ -338,7 +352,7 @@ export default function DashboardPage() {
           <div className="mb-6 grid grid-cols-3 gap-3">
             {[
               { label: "Total Projects", value: stats.totalProjects, color: "from-[#5b6ef5]/20 to-transparent", accent: "#7c8df8" },
-              { label: "Downloading", value: stats.downloading, color: "from-[#3b82f6]/20 to-transparent", accent: "#60a5fa" },
+              { label: "Processing", value: stats.downloading, color: "from-[#3b82f6]/20 to-transparent", accent: "#60a5fa" },
               { label: "Ready", value: stats.ready, color: "from-[#10b981]/20 to-transparent", accent: "#34d399" },
             ].map((stat) => (
               <div key={stat.label} className="relative overflow-hidden rounded-xl border border-slate-200/70 bg-white p-4">
@@ -375,7 +389,7 @@ export default function DashboardPage() {
                 </svg>
               </div>
               <p className="text-sm font-medium text-[#6b6e84]">No projects yet</p>
-              <p className="mt-1 text-xs text-[#3a3d52]">Click <span className="text-[#7c8df8]">New Project</span> to import a YouTube video</p>
+              <p className="mt-1 text-xs text-[#3a3d52]">Click <span className="text-[#7c8df8]">New Project</span> to upload a 1–2 hour video</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -563,8 +577,8 @@ export default function DashboardPage() {
           >
             <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
               <div>
-                <h2 className="text-base font-bold text-white">Import from YouTube</h2>
-                <p className="mt-0.5 text-xs text-[#5a5d72]">Paste a YouTube URL — the video downloads to the server, then you can cut 30s or 60s clips in the editor</p>
+                <h2 className="text-base font-bold text-white">Upload Movie</h2>
+                <p className="mt-0.5 text-xs text-[#5a5d72]">Upload a video (MP4, MOV, WebM, MKV). We automatically cut it into 50-second clips.</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="flex h-7 w-7 items-center justify-center rounded-lg text-[#4a4d60] hover:bg-white/[0.06] hover:text-[#c8cad8] transition-all">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -573,36 +587,47 @@ export default function DashboardPage() {
               </button>
             </div>
 
-            <form onSubmit={handleCreateProject} className="p-5 space-y-4">
+            <form onSubmit={handleUploadProject} className="p-5 space-y-4">
               {error && <p className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</p>}
 
               <div>
-                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-[#4a4d60]">YouTube URL</label>
-                <div className="flex items-center gap-2 rounded-xl border border-white/[0.07] bg-white/[0.04] px-3 py-2.5 focus-within:border-[#5b6ef5]/50 transition-colors">
-                  <svg className="h-4 w-4 flex-shrink-0 text-red-500" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M23.498 6.186a3.016 3.016 0 00-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 00.502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 002.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 002.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
+                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-[#4a4d60]">Video file</label>
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/[0.12] bg-white/[0.04] px-4 py-8 transition-colors hover:border-[#5b6ef5]/50">
+                  <svg className="h-8 w-8 text-[#7c8df8]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                   </svg>
+                  <span className="text-sm font-medium text-[#c8cad8]">
+                    {uploadFile ? uploadFile.name : "Choose MP4, MOV, or MKV (up to 5 GB)"}
+                  </span>
+                  <span className="text-xs text-[#5a5d72]">1–2 hour movies supported</span>
                   <input
-                    value={ytUrl}
-                    onChange={(e) => setYtUrl(e.target.value)}
-                    placeholder="https://youtube.com/watch?v=..."
-                    className="flex-1 bg-transparent text-sm text-[#c8cad8] outline-none placeholder:text-[#3a3d52]"
-                    required
+                    type="file"
+                    accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.mkv,.webm"
+                    className="hidden"
+                    onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
                   />
-                </div>
+                </label>
+                {isCreating && uploadProgress > 0 && (
+                  <div className="mt-3">
+                    <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
+                      <div className="h-full rounded-full bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] transition-all" style={{ width: `${uploadProgress}%` }} />
+                    </div>
+                    <p className="mt-1 text-center text-xs text-[#5a5d72]">{uploadProgress}% uploaded</p>
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center gap-3 pt-1">
-                <button type="button" onClick={() => { setIsModalOpen(false); setError(null) }}
+                <button type="button" onClick={() => { setIsModalOpen(false); setError(null); setUploadFile(null) }}
                   className="flex-1 rounded-xl border border-white/[0.07] py-2.5 text-sm font-medium text-[#6b6e84] hover:bg-white/[0.04] hover:text-[#c8cad8] transition-all">
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isCreating}
+                  disabled={isCreating || !uploadFile}
                   className="flex-1 rounded-xl bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] py-2.5 text-sm font-semibold text-white shadow-lg shadow-[#5b6ef5]/20 hover:opacity-90 disabled:opacity-50 transition-all"
                 >
-                  {isCreating ? "Importing…" : "Import Media"}
+                  {isCreating ? "Uploading…" : "Upload & Cut Clips"}
                 </button>
               </div>
             </form>

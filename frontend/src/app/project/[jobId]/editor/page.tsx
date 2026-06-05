@@ -493,11 +493,14 @@ export default function VideoEditor() {
   const [isRetryingDownload, setIsRetryingDownload] = useState(false)
 
   const projectStatus = (project?.download_status || project?.status || "").toLowerCase()
+  const isUpload = project?.metadata?.source === "upload" || (project?.yt_url || "").startsWith("upload://")
   const isYT = !!(
     project &&
+    !isUpload &&
     !project.cloudinary_raw_url &&
     !project.video_url &&
     project.yt_video_id &&
+    (project.yt_url || "").match(/youtube|youtu\.be/i) &&
     projectStatus !== "ready" &&
     !project.local_video_path
   )
@@ -510,15 +513,21 @@ export default function VideoEditor() {
   const loadProject = useCallback(async () => {
     try {
       const [pR, cR] = await Promise.all([
-        api.get(`/api/v1/projects/${projectId}`),
-        api.get(`/api/v1/projects/${projectId}/clips`),
+        api.get(`/api/v1/projects/${projectId}`, { timeout: 20000 }),
+        api.get(`/api/v1/projects/${projectId}/clips`, { timeout: 20000 }),
       ])
       const proj: ProjectData = pR.data
       setProject(proj)
       if (proj.duration_seconds && proj.duration_seconds > 0) setDuration(proj.duration_seconds)
       setClips(Array.isArray(cR.data) ? cR.data : [])
-    } catch { setError("Could not load project.") }
-    finally { setLoading(false) }
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code
+      if (code === "ECONNABORTED") {
+        setError("Request timed out. Make sure the backend is running on port 8000.")
+      } else {
+        setError("Could not load project. Check that you are logged in and the API is running.")
+      }
+    } finally { setLoading(false) }
   }, [projectId])
 
   const loadCaptions = useCallback(async () => {
@@ -836,10 +845,18 @@ export default function VideoEditor() {
 
   if (loading) return (
     <div className="flex min-h-screen items-center justify-center bg-[#f8fbff]">
-      <div className="text-center">
+      <div className="text-center max-w-sm px-4">
         <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-[#1a73e8] border-t-transparent" />
         <p className="text-sm text-slate-600">Loading editor…</p>
+        <p className="mt-2 text-xs text-slate-400">If this takes too long, check that the backend is running.</p>
       </div>
+    </div>
+  )
+
+  if (!project && error) return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#f8fbff] px-4">
+      <p className="text-sm text-red-600 text-center">{error}</p>
+      <button onClick={() => router.push("/dashboard")} className="rounded-lg bg-[#1a73e8] px-4 py-2 text-sm text-white">Back to Dashboard</button>
     </div>
   )
 

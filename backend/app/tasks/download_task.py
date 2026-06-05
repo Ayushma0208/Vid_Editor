@@ -12,30 +12,20 @@ from app.config import settings
 from app.models.project import Project, ProjectStatus
 from app.services.ffmpeg_service import FfmpegService
 from app.services.ytdlp_service import YTDLPService
-from app.tasks.clip_task import auto_generate_clips_task
+from app.tasks.clip_task import trigger_auto_generate_clips
 
 
-def _ffmpeg_missing_message() -> str:
-    return (
-        "FFmpeg/ffprobe is not installed or not on PATH. "
-        "Install FFmpeg (e.g. winget install Gyan.FFmpeg), restart your terminals, then click Retry."
-    )
-
-
-def _is_ffmpeg_missing_error(exc: Exception) -> bool:
-    if isinstance(exc, FileNotFoundError):
-        return True
-    message = str(exc).lower()
-    return "cannot find the file" in message or "winerror 2" in message
-
-
-def _ffmpeg_available() -> bool:
-    return shutil.which("ffprobe") is not None and shutil.which("ffmpeg") is not None
+from app.utils.ffmpeg_utils import (
+    ffmpeg_available as _ffmpeg_available,
+    ffmpeg_missing_message as _ffmpeg_missing_message,
+    format_exception,
+    is_ffmpeg_missing_error as _is_ffmpeg_missing_error,
+)
 
 
 async def _set_project_error(project: Project, error_message: str) -> None:
     metadata = project.metadata or {}
-    metadata["error_message"] = error_message
+    metadata["error_message"] = (error_message or "").strip() or "Video processing failed."
     project.metadata = metadata
     project.status = ProjectStatus.ERROR
     project.updated_at = datetime.now(timezone.utc)
@@ -107,7 +97,7 @@ async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
     await project.save()
 
     if _ffmpeg_available():
-        auto_generate_clips_task.delay(project_id, settings.default_clip_duration_seconds)
+        await trigger_auto_generate_clips(project_id, settings.default_clip_duration_seconds)
 
     return {
         "project_id": project_id,

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -17,8 +17,11 @@ from app.models.caption import Caption
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project, ProjectStatus
 from app.services.ytdlp_service import YTDLPService
-from app.tasks.clip_task import auto_generate_clips_task
+from app.tasks.clip_task import trigger_auto_generate_clips
 from app.tasks.download_task import _run_download_pipeline, _set_project_error, download_video_task
+from app.services.project_upload import create_project_from_upload
+from app.tasks.upload_task import retry_upload_processing
+from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -187,6 +190,14 @@ async def create_project(
     return response
 
 
+@router.post("/upload", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+async def upload_project_legacy(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    return await create_project_from_upload(file, user_id)
+
+
 @router.post("/seed-dummy", status_code=status.HTTP_201_CREATED)
 async def seed_dummy_project(
     payload: SeedDummyProjectRequest,
@@ -281,6 +292,37 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
     return data
 
 
+@router.post("/{project_id}/retry-processing")
+async def retry_processing(project_id: str, user_id: str = Depends(get_current_user_id)):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    metadata = project.metadata or {}
+    if metadata.get("source") != "upload":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Retry processing is only available for uploaded videos.",
+        )
+
+    if not ffmpeg_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=ffmpeg_missing_message(),
+        )
+
+    try:
+        await retry_upload_processing(project)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    data = serialize_document(project)
+    data["message"] = "Processing restarted."
+    return data
+
+
 @router.post("/{project_id}/retry-download")
 async def retry_download(project_id: str, user_id: str = Depends(get_current_user_id)):
     project = await Project.get(project_id)
@@ -311,7 +353,7 @@ async def retry_download(project_id: str, user_id: str = Depends(get_current_use
 async def generate_clips(
     project_id: str,
     user_id: str = Depends(get_current_user_id),
-    segment_seconds: int = 30,
+    segment_seconds: int | None = None,
 ):
     project = await Project.get(project_id)
     if not project or project.user_id != user_id:
@@ -330,15 +372,16 @@ async def generate_clips(
             detail="Downloaded video file is not available on the server",
         )
 
-    if segment_seconds not in (30, 60):
+    if not segment_seconds or segment_seconds < 1:
         segment_seconds = settings.default_clip_duration_seconds
 
-    task = auto_generate_clips_task.delay(project_id, segment_seconds)
+    trigger = await trigger_auto_generate_clips(project_id, segment_seconds)
     return {
         "project_id": project_id,
-        "task_id": task.id,
+        "task_id": trigger.get("task_id"),
+        "execution_mode": trigger.get("execution_mode"),
         "segment_seconds": segment_seconds,
-        "message": f"Generating {segment_seconds}s clips for the full video",
+        "message": f"Generating {segment_seconds}-second clips for the full video",
     }
 
 

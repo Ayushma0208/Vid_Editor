@@ -6,6 +6,35 @@ import ffmpeg
 
 
 class FfmpegService:
+    async def _run_ffmpeg(self, *args: str) -> None:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode().strip() or "FFmpeg command failed")
+
+    async def transcode_to_mp4(self, input_path: str, output_path: str) -> str:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        await self._run_ffmpeg(
+            "-y",
+            "-i",
+            input_path,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            output_path,
+        )
+        return output_path
+
     async def cut_clip(
         self,
         input_path: str,
@@ -13,31 +42,44 @@ class FfmpegService:
         start_time: float,
         end_time: float,
     ) -> str:
-        stream = ffmpeg.input(input_path, ss=start_time, to=end_time)
-
-        # First attempt stream copy for speed.
-        copy_graph = ffmpeg.output(
-            stream,
-            output_path,
-            c="copy",
-            avoid_negative_ts="make_zero",
-        ).overwrite_output()
-
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        duration = max(0.1, end_time - start_time)
         try:
-            await asyncio.to_thread(ffmpeg.run, copy_graph, capture_stdout=True, capture_stderr=True)
-        except ffmpeg.Error:
-            # Fall back to re-encode when copy cut is not possible.
-            reencode_graph = ffmpeg.output(
-                stream,
+            await self._run_ffmpeg(
+                "-y",
+                "-ss",
+                str(start_time),
+                "-i",
+                input_path,
+                "-t",
+                str(duration),
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
                 output_path,
-                vcodec="libx264",
-                acodec="aac",
-                movflags="+faststart",
-                avoid_negative_ts="make_zero",
-            ).overwrite_output()
-            await asyncio.to_thread(ffmpeg.run, reencode_graph, capture_stdout=True, capture_stderr=True)
-
-        return output_path
+            )
+            return output_path
+        except RuntimeError:
+            await self._run_ffmpeg(
+                "-y",
+                "-ss",
+                str(start_time),
+                "-i",
+                input_path,
+                "-t",
+                str(duration),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                output_path,
+            )
+            return output_path
 
     async def probe_duration(self, input_path: str) -> float | None:
         process = await asyncio.create_subprocess_exec(

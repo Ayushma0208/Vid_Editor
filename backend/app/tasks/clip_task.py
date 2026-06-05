@@ -2,6 +2,7 @@ import asyncio
 import math
 import shutil
 from pathlib import Path
+from typing import Any
 
 from beanie import PydanticObjectId
 
@@ -12,6 +13,7 @@ from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
 from app.services.ffmpeg_service import FfmpegService
+from app.utils.celery_utils import celery_workers_available
 
 
 _cache_lock = None
@@ -124,6 +126,36 @@ async def _resolve_ad_clip_path(
         settings.default_ad_duration_seconds,
     )
     return str(default_ad_path)
+
+
+async def enqueue_clip_processing(project_id: str, clip_id: str) -> str:
+    if await celery_workers_available():
+        try:
+            task = create_clip_task.delay(project_id, clip_id)
+            return task.id
+        except Exception:
+            pass
+
+    asyncio.create_task(run_clip_processing(project_id, clip_id))
+    return "local-background"
+
+
+async def trigger_auto_generate_clips(project_id: str, clip_duration: int | None = None) -> dict[str, Any]:
+    segment_seconds = clip_duration or settings.default_clip_duration_seconds
+
+    if await celery_workers_available():
+        try:
+            task = auto_generate_clips_task.delay(project_id, segment_seconds)
+            return {
+                "task_id": task.id,
+                "execution_mode": "celery",
+                "segment_seconds": segment_seconds,
+            }
+        except Exception:
+            pass
+
+    asyncio.create_task(auto_generate_project_clips(project_id, segment_seconds))
+    return {"task_id": None, "execution_mode": "local-background", "segment_seconds": segment_seconds}
 
 
 def _should_append_ad() -> bool:
@@ -239,6 +271,7 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
     created_count = 0
     queued_count = 0
     segment_starts = range(0, int(math.ceil(duration_seconds)), segment_length)
+    use_celery = await celery_workers_available()
 
     for start_time in segment_starts:
         end_time = min(float(start_time + segment_length), float(duration_seconds))
@@ -252,13 +285,23 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
             start_time=float(start_time),
             end_time=end_time,
             duration=end_time - float(start_time),
-            clip_type=ClipType.THIRTY_SECONDS if segment_length == 30 else ClipType.CUSTOM,
+            clip_type=(
+                ClipType.THIRTY_SECONDS
+                if segment_length == 30
+                else ClipType.SIXTY_SECONDS
+                if segment_length == 60
+                else ClipType.CUSTOM
+            ),
             status=ClipStatus.PENDING,
             created_at=project.created_at,
         )
         await clip.insert()
         created_count += 1
-        create_clip_task.delay(project_id, str(clip.id))
+        clip_id = str(clip.id)
+        if use_celery:
+            await enqueue_clip_processing(project_id, clip_id)
+        else:
+            await run_clip_processing(project_id, clip_id)
         queued_count += 1
 
     return {

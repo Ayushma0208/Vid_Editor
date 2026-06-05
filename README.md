@@ -1,8 +1,8 @@
-# Vid_Editor
+# Movie Clips
 
-Automated video clipping and ad insertion tool.
+Upload long videos and automatically split them into 50-second clips.
 
-This project takes a video URL as input, downloads the video, splits it into smaller clips, and appends a fixed advertisement clip after each segment automatically.
+This project accepts local video uploads (MP4, MOV, MKV, WebM), processes them on the server with FFmpeg, and generates sequential 50-second clips across the full video.
 
 Perfect for:
 - Content repurposing

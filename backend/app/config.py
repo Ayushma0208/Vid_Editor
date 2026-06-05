@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
     temp_dir: str = "/tmp/videoedit"
-    default_clip_duration_seconds: int = 30
+    default_clip_duration_seconds: int = 50  # 50 seconds per clip
+    max_upload_size_bytes: int = 5 * 1024 * 1024 * 1024  # 5 GB
     ad_clip_path: str = ""
     default_ad_duration_seconds: int = 10
     frontend_url: str = "http://localhost:3000"
