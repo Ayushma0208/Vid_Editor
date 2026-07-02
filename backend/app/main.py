@@ -116,20 +116,22 @@ async def on_startup() -> None:
 @app.get("/health")
 async def health_check():
     db_status = "ok"
-    redis_status = "ok"
+    redis_status = "not_configured"
 
     try:
         await database.command("ping")
     except Exception:
         db_status = "error"
 
-    redis_client = redis_from_url(settings.redis_url, decode_responses=True)
-    try:
-        await redis_client.ping()
-    except Exception:
-        redis_status = "error"
-    finally:
-        await redis_client.aclose()
+    if settings.redis_url:
+        redis_status = "ok"
+        redis_client = redis_from_url(settings.redis_url, decode_responses=True)
+        try:
+            await redis_client.ping()
+        except Exception:
+            redis_status = "error"
+        finally:
+            await redis_client.aclose()
 
     overall = "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
     return {"status": overall, "db": db_status, "redis": redis_status}

@@ -1,8 +1,11 @@
 import socketio
 from app.config import settings
 
-# Create a highly scalable AsyncRedisManager
-client_mgr = socketio.AsyncRedisManager(settings.redis_url)
+# Use Redis manager when configured, otherwise keep an in-memory manager.
+if settings.redis_url:
+    client_mgr = socketio.AsyncRedisManager(settings.redis_url)
+else:
+    client_mgr = socketio.AsyncManager()
 
 # Setup the Server
 sio = socketio.AsyncServer(

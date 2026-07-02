@@ -5,7 +5,11 @@ import asyncio
 from app.config import settings
 from app.database import init_db
 
-celery_app = Celery("videoedit", broker=settings.redis_url, backend=settings.redis_url)
+celery_app = Celery(
+    "videoedit",
+    broker=settings.redis_url or "memory://",
+    backend=settings.redis_url or "cache+memory://",
+)
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
