@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 from pathlib import Path
 
 _ffmpeg_path: str | None = None
@@ -62,9 +63,15 @@ ensure_ffmpeg_on_path()
 
 
 def ffmpeg_missing_message() -> str:
+    if sys.platform.startswith("win"):
+        install_hint = "winget install Gyan.FFmpeg"
+    elif sys.platform == "darwin":
+        install_hint = "brew install ffmpeg"
+    else:
+        install_hint = "apt-get update && apt-get install -y ffmpeg"
     return (
         "FFmpeg/ffprobe is not installed or not on PATH. "
-        "Install it with: winget install Gyan.FFmpeg — then restart the backend and click Retry."
+        f"Install it with: {install_hint} — then restart the backend and click Retry."
     )
 
 
