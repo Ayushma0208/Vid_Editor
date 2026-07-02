@@ -1,12 +1,58 @@
 import asyncio
 import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from app.utils.ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
 
+_drawtext_available: bool | None = None
+
 
 class FfmpegService:
+    def _drawtext_available(self) -> bool:
+        global _drawtext_available
+        if _drawtext_available is not None:
+            return _drawtext_available
+
+        ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
+        try:
+            result = subprocess.run(
+                [ffmpeg_bin, "-filters"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            _drawtext_available = " drawtext " in f" {result.stdout} "
+        except OSError:
+            _drawtext_available = False
+        return _drawtext_available
+
+    def _overlay_font_path(self) -> str | None:
+        if sys.platform == "darwin":
+            candidates = (
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/Library/Fonts/Arial.ttf",
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+            )
+        elif os.name == "nt":
+            candidates = (
+                os.environ.get("WINDIR", "C:\\Windows") + "\\Fonts\\arialbd.ttf",
+                os.environ.get("WINDIR", "C:\\Windows") + "\\Fonts\\arial.ttf",
+            )
+        else:
+            candidates = (
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            )
+
+        for candidate in candidates:
+            if Path(candidate).is_file():
+                return candidate
+        return None
+
     async def _run_ffmpeg(self, *args: str) -> None:
         ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
         process = await asyncio.create_subprocess_exec(
@@ -34,11 +80,17 @@ class FfmpegService:
 
     def _part_overlay_filter(self, label: str) -> str:
         display = label.replace(" ", "-").replace("'", "").replace(":", "")
-        font = os.environ.get("WINDIR", "C:\\Windows").replace("\\", "/") + "/Fonts/arialbd.ttf"
-        font_arg = font.replace(":", "\\:")
+        font = self._overlay_font_path()
+        if font:
+            font_arg = font.replace(":", "\\:")
+            return (
+                "drawbox=y=ih-72:color=0xE879A9@0.92:width=iw:height=72:t=fill,"
+                f"drawtext=text='{display}':fontcolor=white:fontsize=36:fontfile='{font_arg}':"
+                "x=(w-text_w)/2:y=h-48"
+            )
         return (
             "drawbox=y=ih-72:color=0xE879A9@0.92:width=iw:height=72:t=fill,"
-            f"drawtext=text='{display}':fontcolor=white:fontsize=36:fontfile='{font_arg}':"
+            f"drawtext=text='{display}':fontcolor=white:fontsize=36:"
             "x=(w-text_w)/2:y=h-48"
         )
 
@@ -130,9 +182,12 @@ class FfmpegService:
             )
 
         if part_label:
-            await self.add_part_label_overlay(work_path, output_path, part_label)
-            if work_path != output_path and Path(work_path).exists():
-                Path(work_path).unlink()
+            if self._drawtext_available():
+                await self.add_part_label_overlay(work_path, output_path, part_label)
+                if work_path != output_path and Path(work_path).exists():
+                    Path(work_path).unlink()
+            else:
+                shutil.move(work_path, output_path)
 
         return output_path
 
