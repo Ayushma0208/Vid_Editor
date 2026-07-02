@@ -134,8 +134,10 @@ export default function DashboardPage() {
     event.preventDefault()
     if (!uploadFile) return
     const isVercelHost = typeof window !== "undefined" && window.location.hostname.endsWith(".vercel.app")
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || ""
+    const apiTargetsRender = /onrender\.com/i.test(apiBase)
     const VERCEL_SAFE_UPLOAD_BYTES = 4 * 1024 * 1024
-    if (isVercelHost && uploadFile.size > VERCEL_SAFE_UPLOAD_BYTES) {
+    if (isVercelHost && !apiTargetsRender && uploadFile.size > VERCEL_SAFE_UPLOAD_BYTES) {
       setError("This file is too large for Vercel upload requests. Use the YouTube URL option below, or deploy backend on a VM/Render/Railway for large local uploads.")
       return
     }
