@@ -403,7 +403,7 @@ export default function DashboardPage() {
                 const isHovered = hoveredCard === id
                 const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
                 const seededThumbnailUrl = id && token
-                  ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/projects/${id}/thumbnail?token=${token}`
+                  ? `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/projects/${id}/thumbnail?token=${token}`
                   : null
                 const cardThumbnailUrl = project.thumbnail_url || (project.metadata?.seeded ? seededThumbnailUrl : null)
 
@@ -533,7 +533,7 @@ export default function DashboardPage() {
                 const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
                 const thumb = project.thumbnail_url ||
                   (project.metadata?.seeded
-                    ? `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/projects/${id}/thumbnail?token=${token}`
+                    ? `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/projects/${id}/thumbnail?token=${token}`
                     : null)
                 return (
                   <button
