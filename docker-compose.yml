@@ -1,4 +1,13 @@
 services:
+  mongo:
+    image: mongo:7
+    container_name: videoedit-mongo
+    ports:
+      - "27017:27017"
+    restart: unless-stopped
+    volumes:
+      - videoedit-mongo-data:/data/db
+
   redis:
     image: redis:7-alpine
     container_name: videoedit-redis
@@ -10,3 +19,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+volumes:
+  videoedit-mongo-data:

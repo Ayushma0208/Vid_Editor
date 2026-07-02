@@ -14,7 +14,7 @@ from app.api.v1.router import api_router
 from app.celery_worker import celery_app
 from app.config import settings
 from app.utils.ffmpeg_utils import ensure_ffmpeg_on_path, ffmpeg_available, get_ffmpeg_path, get_ffprobe_path
-from app.database import init_db
+from app.database import database, init_db
 import socketio
 from app.socket_manager import sio
 

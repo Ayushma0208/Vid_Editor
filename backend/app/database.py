@@ -11,7 +11,13 @@ from app.models.project import Project
 from app.models.user import User
 
 
-client = AsyncIOMotorClient(settings.mongodb_uri, tlsCAFile=certifi.where())
+def _mongo_client_kwargs(uri: str) -> dict:
+    if uri.startswith("mongodb+srv://") or "tls=true" in uri.lower():
+        return {"tlsCAFile": certifi.where()}
+    return {}
+
+
+client = AsyncIOMotorClient(settings.mongodb_uri, **_mongo_client_kwargs(settings.mongodb_uri))
 database = client[settings.mongodb_db_name]
 
 
