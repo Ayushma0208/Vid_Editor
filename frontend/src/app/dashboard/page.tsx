@@ -85,6 +85,8 @@ export default function DashboardPage() {
   const [uploadFile, setUploadFile] = useState<File | null>(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isCreating, setIsCreating] = useState(false)
+  const [youtubeUrl, setYoutubeUrl] = useState("")
+  const [isCreatingFromUrl, setIsCreatingFromUrl] = useState(false)
   const [isSeeding, setIsSeeding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [retrying, setRetrying] = useState<Set<string>>(new Set())
@@ -131,6 +133,12 @@ export default function DashboardPage() {
   const handleUploadProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!uploadFile) return
+    const isVercelHost = typeof window !== "undefined" && window.location.hostname.endsWith(".vercel.app")
+    const VERCEL_SAFE_UPLOAD_BYTES = 4 * 1024 * 1024
+    if (isVercelHost && uploadFile.size > VERCEL_SAFE_UPLOAD_BYTES) {
+      setError("This file is too large for Vercel upload requests. Use the YouTube URL option below, or deploy backend on a VM/Render/Railway for large local uploads.")
+      return
+    }
     setIsCreating(true); setError(null); setUploadProgress(0)
     try {
       const formData = new FormData()
@@ -150,10 +158,33 @@ export default function DashboardPage() {
       const apiError = res?.data?.detail
       if (res?.status === 405) {
         setError("Upload API not available. Restart the backend server and try again.")
+      } else if (res?.status === 413) {
+        setError("Upload failed: payload too large for Vercel. Use YouTube URL import or smaller file.")
       } else {
         setError(typeof apiError === "string" ? apiError : "Could not upload video. Is the backend running?")
       }
     } finally { setIsCreating(false) }
+  }
+
+  const handleCreateFromYoutubeUrl = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const trimmed = youtubeUrl.trim()
+    if (!trimmed) return
+    setIsCreatingFromUrl(true)
+    setError(null)
+    try {
+      await api.post("/api/v1/projects/", { yt_url: trimmed })
+      setYoutubeUrl("")
+      setUploadFile(null)
+      setUploadProgress(0)
+      setIsModalOpen(false)
+      await loadProjects()
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(typeof detail === "string" && detail.trim() ? detail : "Could not create project from YouTube URL.")
+    } finally {
+      setIsCreatingFromUrl(false)
+    }
   }
 
   const handleRetryDownload = async (e: React.MouseEvent, projectId: string) => {
@@ -578,7 +609,7 @@ export default function DashboardPage() {
             <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
               <div>
                 <h2 className="text-base font-bold text-white">Upload Movie</h2>
-                <p className="mt-0.5 text-xs text-[#5a5d72]">Upload a video (MP4, MOV, WebM, MKV). We automatically cut it into 50-second clips.</p>
+                <p className="mt-0.5 text-xs text-[#5a5d72]">Upload a video (MP4, MOV, WebM, MKV) or paste a YouTube URL.</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="flex h-7 w-7 items-center justify-center rounded-lg text-[#4a4d60] hover:bg-white/[0.06] hover:text-[#c8cad8] transition-all">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -631,6 +662,27 @@ export default function DashboardPage() {
                 </button>
               </div>
             </form>
+
+            <div className="border-t border-white/[0.06] px-5 pb-5 pt-4">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[#4a4d60]">YouTube URL (recommended on Vercel)</p>
+              <form onSubmit={handleCreateFromYoutubeUrl} className="space-y-3">
+                <input
+                  type="url"
+                  required
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  className="w-full rounded-xl border border-white/[0.12] bg-white/[0.04] px-3 py-2.5 text-sm text-[#c8cad8] outline-none placeholder:text-[#5a5d72] focus:border-[#5b6ef5]/60"
+                />
+                <button
+                  type="submit"
+                  disabled={isCreatingFromUrl}
+                  className="w-full rounded-xl border border-[#5b6ef5]/40 bg-[#5b6ef5]/15 py-2.5 text-sm font-semibold text-[#aeb8ff] hover:bg-[#5b6ef5]/25 disabled:opacity-50 transition-all"
+                >
+                  {isCreatingFromUrl ? "Creating…" : "Create Project from URL"}
+                </button>
+              </form>
+            </div>
           </div>
         </div>
       )}
