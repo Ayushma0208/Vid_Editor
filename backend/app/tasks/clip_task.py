@@ -14,6 +14,7 @@ from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
 from app.services.ffmpeg_service import FfmpegService
 from app.utils.celery_utils import celery_workers_available
+from app.utils.ffmpeg_utils import get_ffmpeg_path
 
 
 _cache_lock = None
@@ -81,7 +82,7 @@ async def _generate_thumbnail(input_path: str, output_path: str, seek_seconds: f
     """Generate a thumbnail from a clip file. seek_seconds is relative to that file (not the source video)."""
     safe_seek = max(0.0, seek_seconds)
     process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
+        get_ffmpeg_path() or "ffmpeg",
         "-y",
         "-ss",
         str(safe_seek),
@@ -158,6 +159,15 @@ async def trigger_auto_generate_clips(project_id: str, clip_duration: int | None
     return {"task_id": None, "execution_mode": "local-background", "segment_seconds": segment_seconds}
 
 
+async def start_local_clip_generation(project_id: str, clip_duration: int | None = None) -> None:
+    """Generate clips locally without Celery/Redis."""
+    segment_seconds = clip_duration or settings.default_clip_duration_seconds
+    if await celery_workers_available():
+        await trigger_auto_generate_clips(project_id, segment_seconds)
+        return
+    await auto_generate_project_clips(project_id, segment_seconds)
+
+
 def _should_append_ad() -> bool:
     configured = (settings.ad_clip_path or "").strip()
     return bool(configured and Path(configured).expanduser().is_file())
@@ -194,6 +204,7 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
             output_path=clip_output_path,
             start_time=clip.start_time,
             end_time=clip.end_time,
+            part_label=clip.label or None,
         )
 
         await _generate_thumbnail(clip_output_path, thumbnail_output_path, clip.duration / 2)
@@ -270,6 +281,7 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
 
     created_count = 0
     queued_count = 0
+    part_number = 1
     segment_starts = range(0, int(math.ceil(duration_seconds)), segment_length)
     use_celery = await celery_workers_available()
 
@@ -281,7 +293,7 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
         clip = Clip(
             project_id=project_id,
             user_id=project.user_id,
-            label=f"Clip {_format_timestamp(start_time)} – {_format_timestamp(end_time)}",
+            label=f"Part-{part_number}",
             start_time=float(start_time),
             end_time=end_time,
             duration=end_time - float(start_time),
@@ -303,6 +315,7 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
         else:
             await run_clip_processing(project_id, clip_id)
         queued_count += 1
+        part_number += 1
 
     return {
         "project_id": project_id,

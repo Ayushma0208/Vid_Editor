@@ -1,10 +1,9 @@
-import asyncio
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, HTTPException, UploadFile, status
 
 from app.config import settings
 from app.models.project import Project, ProjectStatus
@@ -31,7 +30,11 @@ def serialize_document(doc: Any) -> dict[str, Any]:
     return data
 
 
-async def create_project_from_upload(file: UploadFile, user_id: str) -> dict[str, Any]:
+async def create_project_from_upload(
+    file: UploadFile,
+    user_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
     if not ffmpeg_available():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -113,7 +116,7 @@ async def create_project_from_upload(file: UploadFile, user_id: str) -> dict[str
     project.yt_video_id = f"upload-{project.id}"
     await project.save()
 
-    asyncio.create_task(_run_upload_pipeline_background(str(project.id), temp_path))
+    background_tasks.add_task(_run_upload_pipeline_background, str(project.id), temp_path)
 
     response = serialize_document(project)
     response["execution_mode"] = "local-background"

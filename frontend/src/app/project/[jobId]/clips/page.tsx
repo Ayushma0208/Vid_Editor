@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import api from "@/lib/api"
 
@@ -63,6 +63,12 @@ function clipThumbnailUrl(projectId: string, clipId: string, token: string, clou
   return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/thumbnail?token=${encodeURIComponent(token)}`
 }
 
+function getClipPartLabel(clip: ClipData, partNumber: number): string {
+  const label = (clip.label || "").trim()
+  if (label) return label
+  return `Part-${partNumber}`
+}
+
 function statusBadge(status: string) {
   const s = status.toLowerCase()
   if (s === "ready") return { label: "Ready", dot: "#10b981", className: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" }
@@ -118,12 +124,14 @@ function ClipModal({
   clip,
   projectId,
   token,
+  displayLabel,
   onClose,
   onDelete,
 }: {
   clip: ClipData
   projectId: string
   token: string
+  displayLabel: string
   onClose: () => void
   onDelete: (clipId: string) => void
 }) {
@@ -146,7 +154,7 @@ function ClipModal({
     const url = clip.cloudinary_clip_url || videoSrc
     const a = document.createElement("a")
     a.href = url
-    a.download = clip.label || `clip-${clipId}.mp4`
+    a.download = `${displayLabel.replace(/\s+/g, "-")}.mp4`
     a.target = "_blank"
     a.rel = "noopener noreferrer"
     document.body.appendChild(a)
@@ -197,7 +205,7 @@ function ClipModal({
               {badge.label}
             </span>
             <h2 className="text-sm font-semibold text-[#c8cad8] truncate">
-              {clip.label || `Clip ${formatTime(clip.start_time)} – ${formatTime(clip.end_time)}`}
+              {displayLabel}
             </h2>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
@@ -358,6 +366,20 @@ export default function ProjectClipsPage() {
       setIsGenerating(false)
     }
   }
+
+  const sortedClips = useMemo(
+    () => [...clips].sort((a, b) => (a.start_time ?? 0) - (b.start_time ?? 0)),
+    [clips],
+  )
+
+  const getPartNumber = useCallback(
+    (clip: ClipData) => {
+      const id = clip.id || clip._id || ""
+      const idx = sortedClips.findIndex((c) => (c.id || c._id) === id)
+      return idx >= 0 ? idx + 1 : 1
+    },
+    [sortedClips],
+  )
 
   // ── Loading ──
   if (loading) {
@@ -550,8 +572,10 @@ export default function ProjectClipsPage() {
         ) : (
           /* ── CLIPS GRID ── */
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {clips.map((clip) => {
+            {sortedClips.map((clip) => {
               const clipId = clip.id || clip._id || ""
+              const partNumber = getPartNumber(clip)
+              const displayLabel = getClipPartLabel(clip, partNumber)
               const badge = statusBadge(clip.status || "pending")
               const isHovered = hoveredCard === clipId
               const isReady = (clip.status || "").toLowerCase() === "ready"
@@ -580,7 +604,7 @@ export default function ProjectClipsPage() {
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
                         src={thumbUrl}
-                        alt={clip.label || "Clip"}
+                        alt={displayLabel}
                         className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]"
                       />
                     ) : (
@@ -591,8 +615,15 @@ export default function ProjectClipsPage() {
                       </div>
                     )}
 
+                    {/* Part label bar (like reels) */}
+                    <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-pink-600/95 via-pink-500/85 to-transparent pt-6 pb-2">
+                      <p className="text-center text-sm font-bold tracking-wide text-white drop-shadow">
+                        {displayLabel}
+                      </p>
+                    </div>
+
                     {/* Duration badge */}
-                    <div className="absolute bottom-2 right-2 rounded-md bg-slate-900/10 px-1.5 py-0.5 text-[11px] font-mono text-slate-700 backdrop-blur-sm">
+                    <div className="absolute bottom-10 right-2 rounded-md bg-black/60 px-1.5 py-0.5 text-[11px] font-mono text-white backdrop-blur-sm">
                       {formatDuration(clip.duration)}
                     </div>
 
@@ -619,7 +650,7 @@ export default function ProjectClipsPage() {
                   {/* Card info */}
                   <div className="p-3">
                     <h3 className="text-sm font-medium text-[#c8cad8] truncate leading-tight">
-                      {clip.label || `Clip ${formatTime(clip.start_time)} – ${formatTime(clip.end_time)}`}
+                      {displayLabel}
                     </h3>
 
                     <div className="mt-2 flex items-center justify-between">
@@ -647,6 +678,7 @@ export default function ProjectClipsPage() {
           clip={selectedClip}
           projectId={projectId}
           token={token}
+          displayLabel={getClipPartLabel(selectedClip, getPartNumber(selectedClip))}
           onClose={() => setSelectedClip(null)}
           onDelete={handleClipDeleted}
         />

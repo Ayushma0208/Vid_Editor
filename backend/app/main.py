@@ -13,7 +13,7 @@ from redis.asyncio import from_url as redis_from_url
 from app.api.v1.router import api_router
 from app.celery_worker import celery_app
 from app.config import settings
-from app.database import database
+from app.utils.ffmpeg_utils import ensure_ffmpeg_on_path, ffmpeg_available, get_ffmpeg_path, get_ffprobe_path
 from app.database import init_db
 import socketio
 from app.socket_manager import sio
@@ -104,7 +104,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    ensure_ffmpeg_on_path()
     await init_db()
+    if ffmpeg_available():
+        print(f"[startup] FFmpeg: {get_ffmpeg_path()}")
+        print(f"[startup] FFprobe: {get_ffprobe_path()}")
+    else:
+        print("[startup] WARNING: FFmpeg/ffprobe not found — video processing will fail")
 
 
 @app.get("/health")

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -21,7 +21,7 @@ from app.tasks.clip_task import trigger_auto_generate_clips
 from app.tasks.download_task import _run_download_pipeline, _set_project_error, download_video_task
 from app.services.project_upload import create_project_from_upload
 from app.tasks.upload_task import retry_upload_processing
-from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message
+from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, get_ffmpeg_path, get_ffprobe_path
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -76,7 +76,7 @@ def normalize_youtube_url(raw_url: str) -> str:
 
 async def probe_local_video_duration(video_path: Path) -> float | None:
     process = await asyncio.create_subprocess_exec(
-        "ffprobe",
+        get_ffprobe_path() or "ffprobe",
         "-v",
         "error",
         "-show_entries",
@@ -99,7 +99,7 @@ async def probe_local_video_duration(video_path: Path) -> float | None:
 async def generate_local_thumbnail(video_path: Path, output_path: Path) -> bool:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
+        get_ffmpeg_path() or "ffmpeg",
         "-y",
         "-ss",
         "2",
@@ -192,10 +192,11 @@ async def create_project(
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED, include_in_schema=False)
 async def upload_project_legacy(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user_id: str = Depends(get_current_user_id),
 ):
-    return await create_project_from_upload(file, user_id)
+    return await create_project_from_upload(file, user_id, background_tasks)
 
 
 @router.post("/seed-dummy", status_code=status.HTTP_201_CREATED)
@@ -293,7 +294,11 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
 
 
 @router.post("/{project_id}/retry-processing")
-async def retry_processing(project_id: str, user_id: str = Depends(get_current_user_id)):
+async def retry_processing(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(get_current_user_id),
+):
     project = await Project.get(project_id)
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -312,7 +317,7 @@ async def retry_processing(project_id: str, user_id: str = Depends(get_current_u
         )
 
     try:
-        await retry_upload_processing(project)
+        await retry_upload_processing(project, background_tasks)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except Exception as exc:

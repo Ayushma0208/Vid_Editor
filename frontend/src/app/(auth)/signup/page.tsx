@@ -67,8 +67,16 @@ export default function SignupPage() {
       localStorage.setItem("token", accessToken)
       if (refreshToken) localStorage.setItem("refresh_token", refreshToken)
       router.push("/dashboard")
-    } catch {
-      setError("Unable to create account. Please check your details.")
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number; data?: { detail?: string } } })?.response?.status
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      if (status === 409) {
+        setError(typeof detail === "string" ? detail : "This email is already registered. Please sign in instead.")
+      } else if (typeof detail === "string" && detail.trim()) {
+        setError(detail)
+      } else {
+        setError("Unable to create account. Please check your details.")
+      }
     } finally {
       setIsSubmitting(false)
     }

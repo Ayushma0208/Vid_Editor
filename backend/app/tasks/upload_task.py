@@ -1,17 +1,21 @@
 import asyncio
+import logging
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
 from beanie import PydanticObjectId
+from fastapi import BackgroundTasks
 
 from app.config import settings
 from app.models.project import Project, ProjectStatus
 from app.services.ffmpeg_service import FfmpegService
-from app.tasks.clip_task import trigger_auto_generate_clips
+from app.tasks.clip_task import start_local_clip_generation
 from app.tasks.download_task import _set_project_error
-from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, format_exception
+from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, format_exception, get_ffmpeg_path
+
+logger = logging.getLogger(__name__)
 
 
 def staging_upload_path(user_id: str, original_filename: str) -> Path:
@@ -28,7 +32,7 @@ async def _generate_thumbnail(video_path: Path, output_path: Path) -> bool:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
+            get_ffmpeg_path() or "ffmpeg",
             "-y",
             "-ss",
             "2",
@@ -96,18 +100,16 @@ async def _run_upload_pipeline(project_id: str, source_path: Path) -> dict:
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
 
-    async def _generate_clips_safe() -> None:
-        try:
-            await trigger_auto_generate_clips(project_id, settings.default_clip_duration_seconds)
-        except Exception as exc:
-            fresh = await Project.get(PydanticObjectId(project_id))
-            if fresh:
-                metadata = fresh.metadata or {}
-                metadata["auto_clip_warning"] = format_exception(exc)
-                fresh.metadata = metadata
-                await fresh.save()
-
-    asyncio.create_task(_generate_clips_safe())
+    try:
+        await start_local_clip_generation(project_id, settings.default_clip_duration_seconds)
+    except Exception as exc:
+        logger.exception("Clip generation failed for project %s", project_id)
+        fresh = await Project.get(PydanticObjectId(project_id))
+        if fresh:
+            clip_meta = fresh.metadata or {}
+            clip_meta["auto_clip_warning"] = format_exception(exc)
+            fresh.metadata = clip_meta
+            await fresh.save()
 
     return {
         "project_id": project_id,
@@ -126,6 +128,7 @@ async def _run_upload_pipeline_background(project_id: str, source_path: Path) ->
         await _run_upload_pipeline(project_id, source_path)
         succeeded = True
     except Exception as exc:
+        logger.exception("Upload pipeline failed for project %s", project_id)
         fresh = await Project.get(PydanticObjectId(project_id))
         if fresh:
             await _set_project_error(fresh, format_exception(exc))
@@ -142,7 +145,7 @@ async def _run_upload_pipeline_background(project_id: str, source_path: Path) ->
                 pass
 
 
-async def retry_upload_processing(project: Project) -> None:
+async def retry_upload_processing(project: Project, background_tasks: BackgroundTasks) -> None:
     metadata = project.metadata or {}
     original_filename = metadata.get("original_filename")
     if not original_filename:
@@ -163,4 +166,4 @@ async def retry_upload_processing(project: Project) -> None:
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
 
-    asyncio.create_task(_run_upload_pipeline_background(str(project.id), source_path))
+    background_tasks.add_task(_run_upload_pipeline_background, str(project.id), source_path)
