@@ -105,7 +105,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.on_event("startup")
 async def on_startup() -> None:
     ensure_ffmpeg_on_path()
-    await init_db()
+    try:
+        await init_db()
+    except Exception as exc:
+        print(f"[startup] WARNING: database init failed: {exc}")
     if ffmpeg_available():
         print(f"[startup] FFmpeg: {get_ffmpeg_path()}")
         print(f"[startup] FFprobe: {get_ffprobe_path()}")

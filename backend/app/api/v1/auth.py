@@ -41,7 +41,13 @@ def _create_token(subject: str, token_type: str, ttl: timedelta) -> str:
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 async def register_user(payload: RegisterRequest):
-    existing = await User.find_one(User.email == payload.email)
+    try:
+        existing = await User.find_one(User.email == payload.email)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable. Please try again in a moment.",
+        ) from exc
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
@@ -50,23 +56,35 @@ async def register_user(payload: RegisterRequest):
         hashed_password=pwd_context.hash(payload.password),
         full_name=payload.full_name,
     )
-    await user.insert()
+    try:
+        await user.insert()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not create account right now. Please try again.",
+        ) from exc
 
     user_id = str(user.id)
     access_token = _create_token(user_id, "access", timedelta(hours=24))
     refresh_token = _create_token(user_id, "refresh", timedelta(days=30))
 
-    await database["refresh_tokens"].update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "user_id": user_id,
-                "refresh_token": refresh_token,
-                "expires_at": datetime.now(timezone.utc) + timedelta(days=30),
-            }
-        },
-        upsert=True,
-    )
+    try:
+        await database["refresh_tokens"].update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "user_id": user_id,
+                    "refresh_token": refresh_token,
+                    "expires_at": datetime.now(timezone.utc) + timedelta(days=30),
+                }
+            },
+            upsert=True,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not complete signup right now. Please try again.",
+        ) from exc
 
     return {
         "access_token": access_token,
@@ -78,7 +96,13 @@ async def register_user(payload: RegisterRequest):
 
 @router.post("/login")
 async def login(payload: LoginRequest):
-    user = await User.find_one(User.email == payload.email)
+    try:
+        user = await User.find_one(User.email == payload.email)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable. Please try again in a moment.",
+        ) from exc
     if not user or not pwd_context.verify(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
