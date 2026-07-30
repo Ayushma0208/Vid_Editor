@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 import { useParams, useRouter } from "next/navigation"
 import api from "@/lib/api"
 
@@ -57,10 +57,28 @@ function clipStreamUrl(projectId: string, clipId: string, token: string) {
   return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/stream?token=${encodeURIComponent(token)}`
 }
 
+function clipDownloadUrl(projectId: string, clipId: string, token: string) {
+  return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/download?token=${encodeURIComponent(token)}`
+}
+
+function clipsDownloadAllUrl(projectId: string, token: string) {
+  return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/download-all?token=${encodeURIComponent(token)}`
+}
+
 function clipThumbnailUrl(projectId: string, clipId: string, token: string, cloudinaryUrl?: string | null) {
   if (cloudinaryUrl) return cloudinaryUrl
   if (!token) return null
   return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/thumbnail?token=${encodeURIComponent(token)}`
+}
+
+function triggerBrowserDownload(url: string, filename: string) {
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  a.rel = "noopener noreferrer"
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
 }
 
 function getClipPartLabel(clip: ClipData, partNumber: number): string {
@@ -150,16 +168,13 @@ function ClipModal({
   const posterUrl = clipThumbnailUrl(projectId, clipId, token, clip.thumbnail_url)
 
   // Download handler
-  const handleDownload = () => {
-    const url = clip.cloudinary_clip_url || videoSrc
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `${displayLabel.replace(/\s+/g, "-")}.mp4`
-    a.target = "_blank"
-    a.rel = "noopener noreferrer"
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
+  const handleDownload = (e?: MouseEvent) => {
+    e?.stopPropagation()
+    if (!isReady || !token) return
+    triggerBrowserDownload(
+      clipDownloadUrl(projectId, clipId, token),
+      `${displayLabel.replace(/\s+/g, "-")}.mp4`,
+    )
   }
 
   const handleDelete = async () => {
@@ -296,6 +311,8 @@ export default function ProjectClipsPage() {
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null)
+  const [isDownloadingAll, setIsDownloadingAll] = useState(false)
 
   const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
 
@@ -365,6 +382,27 @@ export default function ProjectClipsPage() {
     } finally {
       setIsGenerating(false)
     }
+  }
+
+  const handleDownloadClip = (clip: ClipData, partNumber: number, e?: MouseEvent) => {
+    e?.stopPropagation()
+    const clipId = clip.id || clip._id || ""
+    if (!clipId || !token) return
+    if ((clip.status || "").toLowerCase() !== "ready") return
+    setDownloadingClipId(clipId)
+    const label = getClipPartLabel(clip, partNumber).replace(/\s+/g, "-")
+    triggerBrowserDownload(clipDownloadUrl(projectId, clipId, token), `${label}.mp4`)
+    window.setTimeout(() => setDownloadingClipId(null), 1200)
+  }
+
+  const handleDownloadAll = () => {
+    const readyClips = clips.filter((c) => (c.status || "").toLowerCase() === "ready")
+    if (!token || readyClips.length === 0) return
+    setIsDownloadingAll(true)
+    setError(null)
+    const slug = (project?.title || "clips").trim().replace(/\s+/g, "-") || "clips"
+    triggerBrowserDownload(clipsDownloadAllUrl(projectId, token), `${slug}-clips.zip`)
+    window.setTimeout(() => setIsDownloadingAll(false), 2000)
   }
 
   const sortedClips = useMemo(
@@ -450,6 +488,16 @@ export default function ProjectClipsPage() {
 
         {/* Actions */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          {readyCount > 0 && (
+            <button
+              onClick={handleDownloadAll}
+              disabled={isDownloadingAll}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 transition-all"
+            >
+              <DownloadIcon />
+              {isDownloadingAll ? "Preparing…" : `Download all (${readyCount})`}
+            </button>
+          )}
           {projectStatus === "error" && isUpload && (
             <button
               onClick={handleRetryProcessing}
@@ -649,9 +697,22 @@ export default function ProjectClipsPage() {
 
                   {/* Card info */}
                   <div className="p-3">
-                    <h3 className="text-sm font-medium text-[#c8cad8] truncate leading-tight">
-                      {displayLabel}
-                    </h3>
+                    <div className="flex items-start justify-between gap-2">
+                      <h3 className="text-sm font-medium text-slate-800 truncate leading-tight">
+                        {displayLabel}
+                      </h3>
+                      {isReady && (
+                        <button
+                          type="button"
+                          title="Download clip"
+                          onClick={(e) => handleDownloadClip(clip, partNumber, e)}
+                          disabled={downloadingClipId === clipId}
+                          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50 transition-all"
+                        >
+                          <DownloadIcon />
+                        </button>
+                      )}
+                    </div>
 
                     <div className="mt-2 flex items-center justify-between">
                       <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.className}`}>

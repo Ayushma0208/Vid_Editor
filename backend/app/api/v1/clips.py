@@ -1,12 +1,17 @@
 import asyncio
+import io
+import re
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from app.api.dependencies import get_current_user_id, resolve_user_id_from_token
 from app.models.clip import Clip, ClipStatus, ClipType
@@ -34,6 +39,30 @@ def serialize_document(doc: Any) -> dict[str, Any]:
     if "_id" in data:
         data["id"] = str(data.pop("_id"))
     return data
+
+
+def _safe_filename(label: str | None, clip_id: str, fallback_prefix: str = "clip") -> str:
+    raw = (label or f"{fallback_prefix}-{clip_id}").strip() or f"{fallback_prefix}-{clip_id}"
+    cleaned = re.sub(r"[^\w\-.\s]+", "", raw, flags=re.UNICODE).strip().replace(" ", "-")
+    cleaned = cleaned or f"{fallback_prefix}-{clip_id}"
+    if not cleaned.lower().endswith(".mp4"):
+        cleaned = f"{cleaned}.mp4"
+    return cleaned
+
+
+async def _clip_bytes(clip: Clip) -> bytes:
+    if clip.local_clip_path:
+        path = Path(clip.local_clip_path)
+        if path.is_file():
+            return await asyncio.to_thread(path.read_bytes)
+
+    if clip.cloudinary_clip_url:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+            response = await client.get(clip.cloudinary_clip_url)
+            response.raise_for_status()
+            return response.content
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not available")
 
 
 def validate_clip_window(payload: CreateClipRequest, project_duration_seconds: float | None) -> None:
@@ -144,6 +173,111 @@ async def stream_project_clip(project_id: str, clip_id: str, request: Request, t
         path=str(clip_path),
         media_type="video/mp4",
         filename=f"{clip.label or clip_id}.mp4",
+    )
+
+
+@router.get("/projects/{project_id}/clips/{clip_id}/download")
+async def download_project_clip(project_id: str, clip_id: str, request: Request, token: str = ""):
+    user_id = resolve_user_id_from_token(token, request)
+    clip = await Clip.get(clip_id)
+    if not clip or clip.project_id != project_id or clip.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+
+    if clip.status != ClipStatus.READY:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Clip is not ready for download")
+
+    filename = _safe_filename(clip.label, clip_id)
+
+    if clip.local_clip_path:
+        clip_path = Path(clip.local_clip_path)
+        if clip_path.is_file():
+            return FileResponse(
+                path=str(clip_path),
+                media_type="video/mp4",
+                filename=filename,
+                content_disposition_type="attachment",
+            )
+
+    if clip.cloudinary_clip_url:
+        try:
+            data = await _clip_bytes(clip)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not fetch clip for download",
+            ) from exc
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="video/mp4",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not available")
+
+
+@router.get("/projects/{project_id}/clips/download-all")
+async def download_all_project_clips(project_id: str, request: Request, token: str = ""):
+    user_id = resolve_user_id_from_token(token, request)
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    clips = (
+        await Clip.find(
+            Clip.project_id == project_id,
+            Clip.user_id == user_id,
+            Clip.status == ClipStatus.READY,
+        )
+        .sort("start_time")
+        .to_list()
+    )
+    if not clips:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No ready clips to download")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            used_names: set[str] = set()
+            for index, clip in enumerate(clips, start=1):
+                clip_id = str(clip.id)
+                base_name = _safe_filename(clip.label or f"Part-{index}", clip_id)
+                name = base_name
+                if name in used_names:
+                    stem = Path(base_name).stem
+                    name = f"{stem}-{index}.mp4"
+                used_names.add(name)
+                try:
+                    data = await _clip_bytes(clip)
+                except Exception:
+                    continue
+                archive.writestr(name, data)
+
+            if not archive.namelist():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Clip files are not available for download",
+                )
+    except HTTPException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not build clips zip",
+        ) from exc
+
+    project_slug = re.sub(r"[^\w\-]+", "-", (project.title or "clips").strip()) or "clips"
+    zip_name = f"{project_slug}-clips.zip"
+    return FileResponse(
+        path=str(tmp_path),
+        media_type="application/zip",
+        filename=zip_name,
+        content_disposition_type="attachment",
+        background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
     )
 
 
