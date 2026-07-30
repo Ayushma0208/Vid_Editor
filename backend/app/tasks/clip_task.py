@@ -310,10 +310,10 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
         await clip.insert()
         created_count += 1
         clip_id = str(clip.id)
-        if use_celery:
-            await enqueue_clip_processing(project_id, clip_id)
-        else:
-            await run_clip_processing(project_id, clip_id)
+        # Process inline. Nesting create_clip_task.delay() from inside a Celery
+        # worker (or asyncio.create_task on the worker loop) leaves clips stuck
+        # in pending without files.
+        await run_clip_processing(project_id, clip_id)
         queued_count += 1
         part_number += 1
 

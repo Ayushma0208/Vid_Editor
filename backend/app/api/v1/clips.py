@@ -17,6 +17,7 @@ from app.api.dependencies import get_current_user_id, resolve_user_id_from_token
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
+from app.services.ftp_service import FtpStorageError, FtpStorageService
 from app.tasks.clip_task import create_clip_task, run_clip_processing
 
 
@@ -48,6 +49,11 @@ def _safe_filename(label: str | None, clip_id: str, fallback_prefix: str = "clip
     if not cleaned.lower().endswith(".mp4"):
         cleaned = f"{cleaned}.mp4"
     return cleaned
+
+
+def _project_subdir(project: Project) -> str:
+    slug = re.sub(r"[^\w\-]+", "-", (project.title or str(project.id)).strip()) or str(project.id)
+    return slug.strip("-") or str(project.id)
 
 
 async def _clip_bytes(clip: Clip) -> bytes:
@@ -279,6 +285,140 @@ async def download_all_project_clips(project_id: str, request: Request, token: s
         content_disposition_type="attachment",
         background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
     )
+
+
+@router.post("/projects/{project_id}/clips/{clip_id}/save-remote")
+async def save_project_clip_remote(
+    project_id: str,
+    clip_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    clip = await Clip.get(clip_id)
+    if not clip or clip.project_id != project_id or clip.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+
+    if clip.status != ClipStatus.READY:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Clip is not ready for download")
+
+    ftp = FtpStorageService()
+    if not ftp.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="FTP storage is not configured. Set FTP_HOST, FTP_USER, and FTP_PASSWORD.",
+        )
+
+    filename = _safe_filename(clip.label, clip_id)
+    try:
+        data = await _clip_bytes(clip)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Clip file is not ready yet. Wait for processing to finish, then try again.",
+            ) from exc
+        raise
+
+    try:
+        public_url = await asyncio.to_thread(
+            ftp.upload_bytes,
+            data,
+            filename,
+            _project_subdir(project),
+        )
+    except FtpStorageError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not upload clip to hosting storage",
+        ) from exc
+
+    return {
+        "saved": True,
+        "clip_id": clip_id,
+        "filename": filename,
+        "url": public_url,
+        "storage": "razorhost-ftp",
+    }
+
+
+@router.post("/projects/{project_id}/clips/save-all-remote")
+async def save_all_project_clips_remote(
+    project_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    from app.config import settings
+
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    ftp = FtpStorageService()
+    if not ftp.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="FTP storage is not configured. Set FTP_HOST, FTP_USER, and FTP_PASSWORD.",
+        )
+
+    clips = (
+        await Clip.find(
+            Clip.project_id == project_id,
+            Clip.user_id == user_id,
+            Clip.status == ClipStatus.READY,
+        )
+        .sort("start_time")
+        .to_list()
+    )
+    if not clips:
+        # Helpful detail when clips exist but are still processing / have no files.
+        all_clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
+        if all_clips:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Clips are still processing. Wait until status is Ready, then save again.",
+            )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No ready clips to save")
+
+    subdir = _project_subdir(project)
+    saved: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    used_names: set[str] = set()
+
+    for index, clip in enumerate(clips, start=1):
+        clip_id = str(clip.id)
+        base_name = _safe_filename(clip.label or f"Part-{index}", clip_id)
+        name = base_name
+        if name in used_names:
+            stem = Path(base_name).stem
+            name = f"{stem}-{index}.mp4"
+        used_names.add(name)
+
+        try:
+            data = await _clip_bytes(clip)
+            public_url = await asyncio.to_thread(ftp.upload_bytes, data, name, subdir)
+            saved.append({"clip_id": clip_id, "filename": name, "url": public_url})
+        except Exception as exc:
+            errors.append({"clip_id": clip_id, "filename": name, "error": str(exc)})
+
+    if not saved:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not upload any clips to hosting storage",
+        )
+
+    folder_url = f"{settings.ftp_public_base_url.rstrip('/')}/{subdir}"
+    return {
+        "saved": True,
+        "storage": "razorhost-ftp",
+        "count": len(saved),
+        "files": saved,
+        "errors": errors,
+        "folder_url": folder_url,
+    }
 
 
 @router.get("/projects/{project_id}/clips/{clip_id}/thumbnail")

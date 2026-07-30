@@ -57,28 +57,15 @@ function clipStreamUrl(projectId: string, clipId: string, token: string) {
   return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/stream?token=${encodeURIComponent(token)}`
 }
 
-function clipDownloadUrl(projectId: string, clipId: string, token: string) {
-  return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/download?token=${encodeURIComponent(token)}`
-}
-
-function clipsDownloadAllUrl(projectId: string, token: string) {
-  return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/download-all?token=${encodeURIComponent(token)}`
-}
-
 function clipThumbnailUrl(projectId: string, clipId: string, token: string, cloudinaryUrl?: string | null) {
   if (cloudinaryUrl) return cloudinaryUrl
   if (!token) return null
   return `${apiBaseUrl()}/api/v1/projects/${projectId}/clips/${clipId}/thumbnail?token=${encodeURIComponent(token)}`
 }
 
-function triggerBrowserDownload(url: string, filename: string) {
-  const a = document.createElement("a")
-  a.href = url
-  a.download = filename
-  a.rel = "noopener noreferrer"
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+function getApiErrorDetail(err: unknown, fallback: string) {
+  const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+  return typeof detail === "string" ? detail : fallback
 }
 
 function getClipPartLabel(clip: ClipData, partNumber: number): string {
@@ -145,6 +132,7 @@ function ClipModal({
   displayLabel,
   onClose,
   onDelete,
+  onSavedRemote,
 }: {
   clip: ClipData
   projectId: string
@@ -152,10 +140,12 @@ function ClipModal({
   displayLabel: string
   onClose: () => void
   onDelete: (clipId: string) => void
+  onSavedRemote: (url: string) => void
 }) {
   const clipId = clip.id || clip._id || ""
   const badge = statusBadge(clip.status || "pending")
   const [isDeleting, setIsDeleting] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const isReady = (clip.status || "").toLowerCase() === "ready"
 
@@ -167,14 +157,20 @@ function ClipModal({
 
   const posterUrl = clipThumbnailUrl(projectId, clipId, token, clip.thumbnail_url)
 
-  // Download handler
-  const handleDownload = (e?: MouseEvent) => {
+  const handleDownload = async (e?: MouseEvent) => {
     e?.stopPropagation()
-    if (!isReady || !token) return
-    triggerBrowserDownload(
-      clipDownloadUrl(projectId, clipId, token),
-      `${displayLabel.replace(/\s+/g, "-")}.mp4`,
-    )
+    if (!isReady || !token || isSaving) return
+    setIsSaving(true)
+    try {
+      const res = await api.post(`/api/v1/projects/${projectId}/clips/${clipId}/save-remote`)
+      const url = res.data?.url as string | undefined
+      if (url) onSavedRemote(url)
+      else window.alert("Saved to hosting, but no public URL was returned.")
+    } catch (err: unknown) {
+      window.alert(getApiErrorDetail(err, "Could not save clip to hosting."))
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const handleDelete = async () => {
@@ -224,14 +220,15 @@ function ClipModal({
             </h2>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            {/* Download */}
+            {/* Save to hosting */}
             {clip.status === "ready" && (
               <button
                 onClick={handleDownload}
-                className="flex items-center gap-1.5 rounded-lg border border-slate-200/70 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-100 transition-all"
+                disabled={isSaving}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-200/70 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-100 disabled:opacity-50 transition-all"
               >
                 <DownloadIcon />
-                Download
+                {isSaving ? "Saving…" : "Save to hosting"}
               </button>
             )}
             {/* Delete */}
@@ -313,6 +310,7 @@ export default function ProjectClipsPage() {
   const [isRetrying, setIsRetrying] = useState(false)
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null)
   const [isDownloadingAll, setIsDownloadingAll] = useState(false)
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
 
   const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
 
@@ -384,25 +382,43 @@ export default function ProjectClipsPage() {
     }
   }
 
-  const handleDownloadClip = (clip: ClipData, partNumber: number, e?: MouseEvent) => {
+  const handleDownloadClip = async (clip: ClipData, partNumber: number, e?: MouseEvent) => {
     e?.stopPropagation()
     const clipId = clip.id || clip._id || ""
     if (!clipId || !token) return
     if ((clip.status || "").toLowerCase() !== "ready") return
     setDownloadingClipId(clipId)
-    const label = getClipPartLabel(clip, partNumber).replace(/\s+/g, "-")
-    triggerBrowserDownload(clipDownloadUrl(projectId, clipId, token), `${label}.mp4`)
-    window.setTimeout(() => setDownloadingClipId(null), 1200)
+    setError(null)
+    try {
+      const res = await api.post(`/api/v1/projects/${projectId}/clips/${clipId}/save-remote`)
+      const url = res.data?.url as string | undefined
+      setSaveNotice(url ? `Saved to hosting: ${url}` : "Saved to hosting.")
+    } catch (err: unknown) {
+      setError(getApiErrorDetail(err, "Could not save clip to hosting."))
+    } finally {
+      setDownloadingClipId(null)
+    }
   }
 
-  const handleDownloadAll = () => {
+  const handleDownloadAll = async () => {
     const readyClips = clips.filter((c) => (c.status || "").toLowerCase() === "ready")
     if (!token || readyClips.length === 0) return
     setIsDownloadingAll(true)
     setError(null)
-    const slug = (project?.title || "clips").trim().replace(/\s+/g, "-") || "clips"
-    triggerBrowserDownload(clipsDownloadAllUrl(projectId, token), `${slug}-clips.zip`)
-    window.setTimeout(() => setIsDownloadingAll(false), 2000)
+    try {
+      const res = await api.post(`/api/v1/projects/${projectId}/clips/save-all-remote`)
+      const count = res.data?.count ?? readyClips.length
+      const folderUrl = res.data?.folder_url as string | undefined
+      setSaveNotice(
+        folderUrl
+          ? `Saved ${count} clip${count === 1 ? "" : "s"} to hosting: ${folderUrl}`
+          : `Saved ${count} clip${count === 1 ? "" : "s"} to hosting.`,
+      )
+    } catch (err: unknown) {
+      setError(getApiErrorDetail(err, "Could not save clips to hosting."))
+    } finally {
+      setIsDownloadingAll(false)
+    }
   }
 
   const sortedClips = useMemo(
@@ -431,7 +447,7 @@ export default function ProjectClipsPage() {
     )
   }
 
-  if (error || !project) {
+  if (!project) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#f8fbff]">
         <p className="text-sm text-red-500">{error || "Project not found."}</p>
@@ -495,7 +511,7 @@ export default function ProjectClipsPage() {
               className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 transition-all"
             >
               <DownloadIcon />
-              {isDownloadingAll ? "Preparing…" : `Download all (${readyCount})`}
+              {isDownloadingAll ? "Saving…" : `Save all to hosting (${readyCount})`}
             </button>
           )}
           {projectStatus === "error" && isUpload && (
@@ -559,6 +575,18 @@ export default function ProjectClipsPage() {
         {processingError && (
           <div className="mb-6 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
             <p className="text-sm text-red-700">{processingError}</p>
+          </div>
+        )}
+
+        {saveNotice && (
+          <div className="mb-6 flex items-start justify-between gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3">
+            <p className="text-sm text-emerald-800 break-all">{saveNotice}</p>
+            <button
+              onClick={() => setSaveNotice(null)}
+              className="text-emerald-700/60 hover:text-emerald-800 text-lg leading-none flex-shrink-0"
+            >
+              ✕
+            </button>
           </div>
         )}
 
@@ -704,7 +732,7 @@ export default function ProjectClipsPage() {
                       {isReady && (
                         <button
                           type="button"
-                          title="Download clip"
+                          title="Save clip to hosting"
                           onClick={(e) => handleDownloadClip(clip, partNumber, e)}
                           disabled={downloadingClipId === clipId}
                           className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-600 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 disabled:opacity-50 transition-all"
@@ -742,6 +770,10 @@ export default function ProjectClipsPage() {
           displayLabel={getClipPartLabel(selectedClip, getPartNumber(selectedClip))}
           onClose={() => setSelectedClip(null)}
           onDelete={handleClipDeleted}
+          onSavedRemote={(url) => {
+            setSaveNotice(`Saved to hosting: ${url}`)
+            setSelectedClip(null)
+          }}
         />
       )}
     </div>

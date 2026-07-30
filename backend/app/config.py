@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     default_ad_duration_seconds: int = 10
     frontend_url: str = "http://localhost:3000"
     yt_dlp_cookies_file: str = ""
+    ftp_host: str = ""
+    ftp_port: int = 21
+    ftp_user: str = ""
+    ftp_password: str = ""
+    ftp_remote_dir: str = "/"
+    ftp_public_base_url: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
