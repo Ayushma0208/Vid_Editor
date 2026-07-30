@@ -15,3 +15,12 @@ tmp/
 uploads/
 dist/
 build/
+.env
+.env.*
+!.env.example
+tests/
+scripts/
+Dockerfile
+.dockerignore
+*.md
+.DS_Store
