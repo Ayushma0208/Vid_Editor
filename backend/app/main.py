@@ -116,8 +116,20 @@ async def on_startup() -> None:
         print("[startup] WARNING: FFmpeg/ffprobe not found — video processing will fail")
 
 
+@app.get("/")
 @app.get("/health")
 async def health_check():
+    """Liveness probe for Render/Docker — must stay fast and always return 200.
+
+    Do not call Mongo/Redis here: unreachable deps can hang the request and
+    cause deploy timeouts even when Uvicorn is running.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Deeper dependency check — not used as the platform health probe."""
     db_status = "ok"
     redis_status = "not_configured"
 
@@ -128,7 +140,12 @@ async def health_check():
 
     if settings.redis_url:
         redis_status = "ok"
-        redis_client = redis_from_url(settings.redis_url, decode_responses=True)
+        redis_client = redis_from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
         try:
             await redis_client.ping()
         except Exception:
@@ -136,8 +153,12 @@ async def health_check():
         finally:
             await redis_client.aclose()
 
-    overall = "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
-    return {"status": overall, "db": db_status, "redis": redis_status}
+    overall = "ok" if db_status == "ok" and redis_status in ("ok", "not_configured") else "degraded"
+    status_code = 200 if overall == "ok" else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": overall, "db": db_status, "redis": redis_status},
+    )
 
 
 @app.get("/api/v1/tasks/{task_id}")
