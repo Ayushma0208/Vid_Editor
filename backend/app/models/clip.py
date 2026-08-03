@@ -37,6 +37,8 @@ class Clip(Document):
     publish_status: str | None = None
     published_media_id: str | None = None
     published_url: str | None = None
+    host_uploads: dict[str, dict] = Field(default_factory=dict)
+    distribute_task_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Settings:

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import api from "@/lib/api"
 
@@ -14,21 +14,41 @@ type ClipData = {
   status?: string
   cloudinary_clip_url?: string | null
   thumbnail_url?: string | null
+  host_uploads?: Record<string, HostUploadState>
+  publish_status?: string | null
+  publish_platform?: string | null
+  published_url?: string | null
 }
 
 type PublishTarget = "youtube" | "instagram"
+type HostKey = "krakenfiles" | "uploadrar" | "up4ever"
+
+type HostUploadState = {
+  status?: string
+  url?: string | null
+  file_code?: string | null
+  error?: string | null
+  updated_at?: string | null
+}
 
 type PublishStatus = {
   clipId: string
-  target: PublishTarget
+  target: PublishTarget | HostKey
   status: "idle" | "publishing" | "success" | "error"
   message?: string
+  url?: string
   timestamp?: string
 }
 
 type ConnectedAccount = {
   youtube: boolean
   instagram: boolean
+}
+
+type HostInfo = {
+  key: HostKey
+  label: string
+  configured: boolean
 }
 
 function formatDuration(totalSeconds?: number | null) {
@@ -42,6 +62,10 @@ function formatTimestamp(iso?: string) {
   if (!iso) return ""
   const d = new Date(iso)
   return d.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 const PLATFORMS = [
@@ -59,7 +83,6 @@ const PLATFORMS = [
     ringColor: "ring-red-200",
     activeBorder: "border-red-400",
     activeBg: "bg-red-50",
-    badge: "bg-red-100 text-red-700",
     connectBg: "bg-red-600 hover:bg-red-700",
   },
   {
@@ -76,9 +99,14 @@ const PLATFORMS = [
     ringColor: "ring-pink-200",
     activeBorder: "border-pink-400",
     activeBg: "bg-pink-50",
-    badge: "bg-pink-100 text-pink-700",
     connectBg: "bg-gradient-to-r from-pink-500 to-purple-600 hover:from-pink-600 hover:to-purple-700",
   },
+]
+
+const DEFAULT_HOSTS: HostInfo[] = [
+  { key: "krakenfiles", label: "KrakenFiles", configured: false },
+  { key: "uploadrar", label: "Uploadrar", configured: false },
+  { key: "up4ever", label: "Up-4ever", configured: false },
 ]
 
 export default function PublishPage() {
@@ -90,7 +118,7 @@ export default function PublishPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedClipId, setSelectedClipId] = useState<string>("")
-  const [selectedPlatform, setSelectedPlatform] = useState<PublishTarget>("youtube")
+  const [selectedPlatform, setSelectedPlatform] = useState<PublishTarget>("instagram")
   const [publishTitle, setPublishTitle] = useState("")
   const [publishDescription, setPublishDescription] = useState("")
   const [publishStatuses, setPublishStatuses] = useState<PublishStatus[]>([])
@@ -98,6 +126,9 @@ export default function PublishPage() {
     youtube: false,
     instagram: false,
   })
+  const [hosts, setHosts] = useState<HostInfo[]>(DEFAULT_HOSTS)
+  const [selectedHosts, setSelectedHosts] = useState<HostKey[]>([])
+  const [distributing, setDistributing] = useState(false)
   const [connectingPlatform, setConnectingPlatform] = useState<PublishTarget | null>(null)
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null)
   const [activeTab, setActiveTab] = useState<"publish" | "history">("publish")
@@ -113,7 +144,7 @@ export default function PublishPage() {
       const clipsData = Array.isArray(response.data) ? response.data : []
       setClips(clipsData)
       if (clipsData.length > 0) {
-        setSelectedClipId(clipsData[0].id || clipsData[0]._id || "")
+        setSelectedClipId((prev) => prev || clipsData[0].id || clipsData[0]._id || "")
       }
     } catch {
       setError("Could not load clips.")
@@ -122,15 +153,26 @@ export default function PublishPage() {
     }
   }, [projectId])
 
-  // Load connected account status from localStorage (persists across sessions)
-  useEffect(() => {
-    const saved = localStorage.getItem("connectedAccounts")
-    if (saved) {
-      try {
-        setConnectedAccounts(JSON.parse(saved))
-      } catch {
-        // ignore
-      }
+  const loadAuthStatus = useCallback(async () => {
+    try {
+      const response = await api.get("/api/v1/auth/status")
+      setConnectedAccounts({
+        youtube: Boolean(response.data?.youtube),
+        instagram: Boolean(response.data?.instagram),
+      })
+      const hostMap = response.data?.hosts || {}
+      setHosts((prev) =>
+        prev.map((host) => ({
+          ...host,
+          configured: Boolean(hostMap[host.key]),
+        }))
+      )
+      setSelectedHosts((prev) => {
+        if (prev.length > 0) return prev
+        return DEFAULT_HOSTS.map((h) => h.key).filter((key) => Boolean(hostMap[key]))
+      })
+    } catch {
+      // Keep prior UI state if auth status is unavailable.
     }
   }, [])
 
@@ -141,131 +183,253 @@ export default function PublishPage() {
       return
     }
     loadClips()
-  }, [loadClips, router])
+    loadAuthStatus()
+  }, [loadClips, loadAuthStatus, router])
+
+  useEffect(() => {
+    const onFocus = () => {
+      loadAuthStatus()
+    }
+    window.addEventListener("focus", onFocus)
+    return () => window.removeEventListener("focus", onFocus)
+  }, [loadAuthStatus])
+
+  const selectedClip = useMemo(
+    () => clips.find((c) => (c.id || c._id) === selectedClipId),
+    [clips, selectedClipId]
+  )
 
   const handleConnectAccount = async (platform: PublishTarget) => {
     setConnectingPlatform(platform)
     try {
-      // Try to get OAuth URL from backend
-      const response = await api.get(`/api/v1/auth/oauth/${platform}`)
+      const response = await api.post(`/api/v1/auth/${platform}`)
       if (response.data?.auth_url) {
         window.open(response.data.auth_url, "_blank", "width=600,height=700")
-        showToast(`Opening ${platform} login — complete it in the new window.`, "info")
-        // Optimistically mark as connected; real apps would verify via callback
-        setTimeout(() => {
-          const updated = { ...connectedAccounts, [platform]: true }
-          setConnectedAccounts(updated)
-          localStorage.setItem("connectedAccounts", JSON.stringify(updated))
-          showToast(`${platform === "youtube" ? "YouTube" : "Instagram"} connected! ✓`, "success")
-        }, 3000)
+        showToast(`Complete ${platform} login in the new window, then return here.`, "info")
+      } else {
+        showToast("Could not start OAuth. Check backend credentials.", "error")
       }
-    } catch {
-      // Backend OAuth not ready yet — show Coming Soon message
-      showToast(`${platform === "youtube" ? "YouTube" : "Instagram"} OAuth is coming soon. Backend integration pending.`, "info")
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      showToast(detail || `Failed to start ${platform} OAuth.`, "error")
     } finally {
       setConnectingPlatform(null)
     }
   }
 
-  const handleDisconnect = (platform: PublishTarget) => {
-    const updated = { ...connectedAccounts, [platform]: false }
-    setConnectedAccounts(updated)
-    localStorage.setItem("connectedAccounts", JSON.stringify(updated))
-    showToast(`${platform === "youtube" ? "YouTube" : "Instagram"} disconnected.`, "info")
+  const getPublishStatus = (clipId: string, target: PublishTarget | HostKey) =>
+    publishStatuses.find((s) => s.clipId === clipId && s.target === target)
+
+  const upsertStatus = (entry: PublishStatus) => {
+    setPublishStatuses((prev) => [
+      ...prev.filter((s) => !(s.clipId === entry.clipId && s.target === entry.target)),
+      entry,
+    ])
   }
 
-  const getPublishStatus = (clipId: string, target: PublishTarget) =>
-    publishStatuses.find((s) => s.clipId === clipId && s.target === target)
+  const pollPublishStatus = async (clipId: string, platform: PublishTarget) => {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await sleep(2000)
+      const response = await api.get(`/api/v1/clips/${clipId}/publish/status`)
+      const publishStatus = response.data?.publish_status as string | undefined
+      const publishedUrl = response.data?.published_url as string | undefined
+      if (publishStatus === "published") {
+        return { ok: true as const, url: publishedUrl }
+      }
+      if (publishStatus === "error") {
+        const detail =
+          typeof response.data?.result === "object" && response.data?.result?.error
+            ? String(response.data.result.error)
+            : "Publish failed"
+        return { ok: false as const, error: detail }
+      }
+    }
+    return { ok: false as const, error: "Publish timed out. Check status later." }
+  }
 
   const handlePublish = async () => {
     if (!selectedClipId || !publishTitle.trim()) return
 
     const platform = PLATFORMS.find((p) => p.key === selectedPlatform)!
-
     if (!connectedAccounts[selectedPlatform]) {
       showToast(`Connect your ${platform.shortLabel} account first.`, "error")
       return
     }
 
-    setPublishStatuses((prev) => [
-      ...prev.filter((s) => !(s.clipId === selectedClipId && s.target === selectedPlatform)),
-      { clipId: selectedClipId, target: selectedPlatform, status: "publishing" },
-    ])
+    if (!selectedClip?.cloudinary_clip_url) {
+      showToast("This clip has no Cloudinary URL. Re-process the clip before publishing.", "error")
+      return
+    }
+
+    upsertStatus({
+      clipId: selectedClipId,
+      target: selectedPlatform,
+      status: "publishing",
+    })
 
     try {
-      await api.post(`/api/v1/projects/${projectId}/publish`, {
-        clip_id: selectedClipId,
-        platform: selectedPlatform,
+      await api.post(`/api/v1/clips/${selectedClipId}/publish/${selectedPlatform}`, {
         title: publishTitle.trim(),
         description: publishDescription.trim(),
       })
 
+      const result = await pollPublishStatus(selectedClipId, selectedPlatform)
       const now = new Date().toISOString()
-      setPublishStatuses((prev) => [
-        ...prev.filter((s) => !(s.clipId === selectedClipId && s.target === selectedPlatform)),
-        {
+      if (result.ok) {
+        upsertStatus({
           clipId: selectedClipId,
           target: selectedPlatform,
           status: "success",
-          message: `Published to ${platform.label} successfully!`,
+          message: result.url
+            ? `Published to ${platform.label}: ${result.url}`
+            : `Published to ${platform.label} successfully!`,
+          url: result.url,
           timestamp: now,
-        },
-      ])
-      showToast(`Published to ${platform.label}! ✓`, "success")
-    } catch (err: unknown) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      const now = new Date().toISOString()
-      setPublishStatuses((prev) => [
-        ...prev.filter((s) => !(s.clipId === selectedClipId && s.target === selectedPlatform)),
-        {
+        })
+        showToast(`Published to ${platform.label}!`, "success")
+        await loadClips()
+      } else {
+        upsertStatus({
           clipId: selectedClipId,
           target: selectedPlatform,
           status: "error",
-          message: detail || "Publish failed. Please try again.",
+          message: result.error,
           timestamp: now,
-        },
-      ])
+        })
+        showToast(result.error, "error")
+      }
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      const now = new Date().toISOString()
+      upsertStatus({
+        clipId: selectedClipId,
+        target: selectedPlatform,
+        status: "error",
+        message: detail || "Publish failed. Please try again.",
+        timestamp: now,
+      })
       showToast(detail || "Publish failed. Please try again.", "error")
     }
   }
 
-  const selectedClip = clips.find((c) => (c.id || c._id) === selectedClipId)
+  const pollDistributeStatus = async (clipId: string, hostsToWatch: HostKey[]) => {
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await sleep(2000)
+      const response = await api.get(`/api/v1/clips/${clipId}/distribute/status`)
+      const hostUploads = (response.data?.host_uploads || {}) as Record<string, HostUploadState>
+      const settled = hostsToWatch.every((host) => {
+        const status = hostUploads[host]?.status
+        return status === "ready" || status === "error" || status === "skipped"
+      })
+      if (settled) {
+        return hostUploads
+      }
+    }
+    const response = await api.get(`/api/v1/clips/${clipId}/distribute/status`)
+    return (response.data?.host_uploads || {}) as Record<string, HostUploadState>
+  }
+
+  const handleDistribute = async () => {
+    if (!selectedClipId || selectedHosts.length === 0) return
+
+    const configuredSelected = selectedHosts.filter((key) => hosts.find((h) => h.key === key)?.configured)
+    if (configuredSelected.length === 0) {
+      showToast("No configured hosts selected. Add API keys in backend env.", "error")
+      return
+    }
+
+    setDistributing(true)
+    for (const host of configuredSelected) {
+      upsertStatus({
+        clipId: selectedClipId,
+        target: host,
+        status: "publishing",
+      })
+    }
+
+    try {
+      await api.post(`/api/v1/clips/${selectedClipId}/distribute`, {
+        hosts: configuredSelected,
+      })
+      const hostUploads = await pollDistributeStatus(selectedClipId, configuredSelected)
+      const now = new Date().toISOString()
+
+      for (const host of configuredSelected) {
+        const state = hostUploads[host]
+        const label = hosts.find((h) => h.key === host)?.label || host
+        if (state?.status === "ready" && state.url) {
+          upsertStatus({
+            clipId: selectedClipId,
+            target: host,
+            status: "success",
+            message: `${label}: ${state.url}`,
+            url: state.url,
+            timestamp: now,
+          })
+        } else if (state?.status === "skipped") {
+          upsertStatus({
+            clipId: selectedClipId,
+            target: host,
+            status: "error",
+            message: `${label}: skipped (${state.error || "not configured"})`,
+            timestamp: now,
+          })
+        } else {
+          upsertStatus({
+            clipId: selectedClipId,
+            target: host,
+            status: "error",
+            message: `${label}: ${state?.error || "Upload failed"}`,
+            timestamp: now,
+          })
+        }
+      }
+
+      setClips((prev) =>
+        prev.map((clip) => {
+          const id = clip.id || clip._id
+          if (id !== selectedClipId) return clip
+          return { ...clip, host_uploads: hostUploads }
+        })
+      )
+      showToast("Host uploads finished.", "success")
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      showToast(detail || "Host distribute failed.", "error")
+    } finally {
+      setDistributing(false)
+    }
+  }
+
+  const toggleHost = (key: HostKey) => {
+    setSelectedHosts((prev) => (prev.includes(key) ? prev.filter((h) => h !== key) : [...prev, key]))
+  }
+
   const currentStatus = getPublishStatus(selectedClipId, selectedPlatform)
   const isPublishing = currentStatus?.status === "publishing"
-
-  // All publish history (success + error)
   const publishHistory = publishStatuses.filter((s) => s.status === "success" || s.status === "error")
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#faf8ff]">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[#004ac6]/20 border-t-[#004ac6]" />
-          <p className="text-sm text-[#737686]">Loading clips…</p>
-        </div>
+      <div className="flex min-h-screen items-center justify-center bg-[#f7f8fc] text-sm text-[#737686]">
+        Loading publish tools…
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-[#faf8ff] text-[#191b23]">
-      {/* Header */}
-      <header className="sticky top-0 z-40 flex h-12 items-center justify-between border-b border-[#e1e2ed] bg-white/70 px-4 shadow-[0_2px_10px_-3px_rgba(0,0,0,0.07)] backdrop-blur-xl">
-        <div className="flex items-center gap-4">
+    <div className="min-h-screen bg-[#f7f8fc] text-[#191b23]">
+      <header className="border-b border-[#e1e2ed] bg-white px-6 py-4">
+        <div className="mx-auto flex max-w-5xl items-center gap-3">
           <button
             onClick={() => router.push(`/project/${projectId}/clips`)}
-            className="text-sm font-medium text-[#004ac6] hover:underline"
+            className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs text-[#737686] hover:border-[#004ac6] hover:text-[#004ac6]"
           >
-            ← Back to Clips
+            ← Clips
           </button>
-          <span className="text-sm text-[#c3c6d7]">|</span>
-          <span className="text-sm font-bold">Publish</span>
-        </div>
-        {/* Tabs */}
-        <div className="flex items-center gap-1 rounded-lg bg-[#f0f1f9] p-1">
           <button
             onClick={() => setActiveTab("publish")}
-            className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
               activeTab === "publish" ? "bg-white shadow-sm text-[#191b23]" : "text-[#737686] hover:text-[#191b23]"
             }`}
           >
@@ -273,7 +437,7 @@ export default function PublishPage() {
           </button>
           <button
             onClick={() => setActiveTab("history")}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition-all ${
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium ${
               activeTab === "history" ? "bg-white shadow-sm text-[#191b23]" : "text-[#737686] hover:text-[#191b23]"
             }`}
           >
@@ -288,14 +452,12 @@ export default function PublishPage() {
       </header>
 
       <main className="mx-auto max-w-5xl px-6 py-8">
-
-        {/* ─── PUBLISH TAB ─── */}
         {activeTab === "publish" && (
           <>
             <div className="mb-6">
               <h1 className="text-2xl font-bold">Publish Clips</h1>
               <p className="mt-1 text-sm text-[#434655]">
-                Connect your accounts, pick a clip, and publish directly to YouTube Shorts or Instagram Reels.
+                Publish to Instagram Reels / YouTube Shorts, and upload the same clip to PPD file hosts in parallel.
               </p>
             </div>
 
@@ -305,13 +467,15 @@ export default function PublishPage() {
               </div>
             )}
 
-            {/* ── Connected Accounts Banner ── */}
             <section className="mb-6 rounded-xl border border-[#e1e2ed] bg-white p-5 shadow-sm">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-semibold">Connected Accounts</h2>
-                <span className="rounded-full bg-[#f0f1f9] px-2 py-0.5 text-[10px] text-[#737686]">
-                  {Object.values(connectedAccounts).filter(Boolean).length} / 2 connected
-                </span>
+                <button
+                  onClick={() => loadAuthStatus()}
+                  className="text-[11px] font-medium text-[#004ac6] hover:underline"
+                >
+                  Refresh status
+                </button>
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {PLATFORMS.map((platform) => {
@@ -320,7 +484,7 @@ export default function PublishPage() {
                   return (
                     <div
                       key={platform.key}
-                      className={`flex items-center justify-between rounded-xl border p-4 transition-all ${
+                      className={`flex items-center justify-between rounded-xl border p-4 ${
                         isConnected ? "border-emerald-200 bg-emerald-50" : "border-[#e1e2ed] bg-[#faf8ff]"
                       }`}
                     >
@@ -332,40 +496,22 @@ export default function PublishPage() {
                         </div>
                       </div>
                       {isConnected ? (
-                        <div className="flex items-center gap-2">
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
-                            ✓ Connected
-                          </span>
-                          <button
-                            onClick={() => handleDisconnect(platform.key)}
-                            className="rounded-md border border-[#e1e2ed] px-2 py-1 text-[10px] text-[#737686] hover:border-red-300 hover:text-red-600 transition-colors"
-                          >
-                            Disconnect
-                          </button>
-                        </div>
+                        <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                          Connected
+                        </span>
                       ) : (
                         <button
                           onClick={() => handleConnectAccount(platform.key)}
                           disabled={isConnecting}
-                          className={`rounded-lg px-3 py-1.5 text-xs font-medium text-white transition-all disabled:opacity-60 ${platform.connectBg}`}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60 ${platform.connectBg}`}
                         >
-                          {isConnecting ? (
-                            <span className="flex items-center gap-1.5">
-                              <span className="h-3 w-3 animate-spin rounded-full border border-white/30 border-t-white" />
-                              Connecting…
-                            </span>
-                          ) : (
-                            "Connect"
-                          )}
+                          {isConnecting ? "Connecting…" : "Connect"}
                         </button>
                       )}
                     </div>
                   )
                 })}
               </div>
-              <p className="mt-3 text-[11px] text-[#737686]">
-                ⚠️ OAuth integration is pending backend setup. Connecting will open the auth window once the backend is ready.
-              </p>
             </section>
 
             {clips.length === 0 ? (
@@ -380,8 +526,6 @@ export default function PublishPage() {
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1.2fr]">
-
-                {/* Left — Clip selector */}
                 <section>
                   <h2 className="mb-3 text-base font-semibold">Select a Clip</h2>
                   <div className="space-y-3">
@@ -403,7 +547,6 @@ export default function PublishPage() {
                           }`}
                         >
                           <div className="flex items-center gap-3">
-                            {/* Thumbnail */}
                             <div className="relative h-14 w-24 flex-shrink-0 overflow-hidden rounded-lg bg-[#ededf9]">
                               {clip.thumbnail_url ? (
                                 // eslint-disable-next-line @next/next/no-img-element
@@ -421,31 +564,25 @@ export default function PublishPage() {
                                 {formatDuration(clip.duration)}
                               </div>
                             </div>
-
-                            {/* Info */}
                             <div className="min-w-0 flex-1">
                               <p className="truncate text-sm font-medium">
-                                {clip.label || `Clip ${formatDuration(clip.start_time)} – ${formatDuration(clip.end_time)}`}
+                                {clip.label ||
+                                  `Clip ${formatDuration(clip.start_time)} – ${formatDuration(clip.end_time)}`}
                               </p>
                               <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                {!clip.cloudinary_clip_url && (
+                                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                    No Cloudinary URL
+                                  </span>
+                                )}
                                 {ytStatus?.status === "success" && (
                                   <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
-                                    ✓ YouTube
+                                    YouTube
                                   </span>
                                 )}
                                 {igStatus?.status === "success" && (
                                   <span className="rounded-full bg-pink-100 px-2 py-0.5 text-[10px] font-semibold text-pink-700">
-                                    ✓ Instagram
-                                  </span>
-                                )}
-                                {ytStatus?.status === "error" && (
-                                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
-                                    ✗ YouTube failed
-                                  </span>
-                                )}
-                                {igStatus?.status === "error" && (
-                                  <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
-                                    ✗ Instagram failed
+                                    Instagram
                                   </span>
                                 )}
                               </div>
@@ -457,157 +594,202 @@ export default function PublishPage() {
                   </div>
                 </section>
 
-                {/* Right — Publish form */}
-                <section className="rounded-xl border border-[#e1e2ed] bg-white p-6 shadow-sm">
-                  <h2 className="mb-4 text-base font-semibold">Publish Settings</h2>
+                <div className="space-y-6">
+                  <section className="rounded-xl border border-[#e1e2ed] bg-white p-6 shadow-sm">
+                    <h2 className="mb-4 text-base font-semibold">Social Publish</h2>
 
-                  {/* Platform selector */}
-                  <div className="mb-5">
-                    <p className="mb-2 text-xs font-medium uppercase text-[#737686]">Platform</p>
-                    <div className="grid grid-cols-2 gap-3">
-                      {PLATFORMS.map((platform) => {
-                        const isActive = selectedPlatform === platform.key
-                        const isConnected = connectedAccounts[platform.key]
+                    <div className="mb-5">
+                      <p className="mb-2 text-xs font-medium uppercase text-[#737686]">Platform</p>
+                      <div className="grid grid-cols-2 gap-3">
+                        {PLATFORMS.map((platform) => {
+                          const isActive = selectedPlatform === platform.key
+                          const isConnected = connectedAccounts[platform.key]
+                          return (
+                            <button
+                              key={platform.key}
+                              type="button"
+                              onClick={() => setSelectedPlatform(platform.key)}
+                              className={`relative flex items-center gap-2 rounded-xl border px-4 py-3 text-sm font-medium transition-all ${
+                                isActive
+                                  ? `${platform.activeBg} ${platform.activeBorder} ${platform.color} ring-2 ${platform.ringColor}`
+                                  : "border-[#e1e2ed] text-[#737686] hover:border-[#c3c6d7]"
+                              }`}
+                            >
+                              <span className={isActive ? platform.color : "text-[#737686]"}>
+                                {platform.icon}
+                              </span>
+                              {platform.shortLabel}
+                              {isConnected && (
+                                <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-emerald-400" />
+                              )}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+
+                    {!connectedAccounts[selectedPlatform] && (
+                      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-700">
+                        Connect your {PLATFORMS.find((p) => p.key === selectedPlatform)?.shortLabel} account
+                        above to publish.
+                      </div>
+                    )}
+
+                    {selectedClip && !selectedClip.cloudinary_clip_url && (
+                      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-700">
+                        This clip has no Cloudinary URL. Instagram/YouTube publish requires Cloudinary.
+                      </div>
+                    )}
+
+                    <div className="mb-4">
+                      <label className="mb-1.5 block text-xs font-medium uppercase text-[#737686]">
+                        Title <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        value={publishTitle}
+                        onChange={(e) => setPublishTitle(e.target.value)}
+                        placeholder="Enter a catchy title..."
+                        maxLength={100}
+                        className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none focus:border-[#004ac6]"
+                      />
+                    </div>
+
+                    <div className="mb-6">
+                      <label className="mb-1.5 block text-xs font-medium uppercase text-[#737686]">
+                        Description / caption
+                      </label>
+                      <textarea
+                        value={publishDescription}
+                        onChange={(e) => setPublishDescription(e.target.value)}
+                        rows={3}
+                        maxLength={500}
+                        placeholder="Add a description, hashtags..."
+                        className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none focus:border-[#004ac6]"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handlePublish}
+                      disabled={
+                        isPublishing ||
+                        !selectedClipId ||
+                        !publishTitle.trim() ||
+                        !connectedAccounts[selectedPlatform] ||
+                        !selectedClip?.cloudinary_clip_url
+                      }
+                      className="w-full rounded-lg bg-gradient-to-r from-[#004ac6] to-[#712ae2] py-2.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isPublishing
+                        ? "Publishing…"
+                        : `Publish to ${PLATFORMS.find((p) => p.key === selectedPlatform)?.label}`}
+                    </button>
+
+                    {currentStatus?.status === "success" && (
+                      <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+                        {currentStatus.message}
+                        {currentStatus.url && (
+                          <a
+                            href={currentStatus.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 block underline"
+                          >
+                            Open post
+                          </a>
+                        )}
+                      </div>
+                    )}
+                    {currentStatus?.status === "error" && (
+                      <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                        {currentStatus.message}
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="rounded-xl border border-[#e1e2ed] bg-white p-6 shadow-sm">
+                    <h2 className="mb-1 text-base font-semibold">File Hosts</h2>
+                    <p className="mb-4 text-xs text-[#737686]">
+                      Upload the selected clip to KrakenFiles, Uploadrar, and Up-4ever in parallel.
+                    </p>
+
+                    <div className="mb-4 space-y-2">
+                      {hosts.map((host) => {
+                        const checked = selectedHosts.includes(host.key)
+                        const existing = selectedClip?.host_uploads?.[host.key]
                         return (
-                          <button
-                            key={platform.key}
-                            type="button"
-                            onClick={() => setSelectedPlatform(platform.key)}
-                            className={`relative flex items-center gap-2 rounded-xl border px-4 py-3 text-sm font-medium transition-all ${
-                              isActive
-                                ? `${platform.activeBg} ${platform.activeBorder} ${platform.color} ring-2 ${platform.ringColor}`
-                                : "border-[#e1e2ed] text-[#737686] hover:border-[#c3c6d7]"
+                          <label
+                            key={host.key}
+                            className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 ${
+                              host.configured ? "border-[#e1e2ed] bg-white" : "border-[#ececf5] bg-[#f7f8fc] opacity-70"
                             }`}
                           >
-                            <span className={isActive ? platform.color : "text-[#737686]"}>
-                              {platform.icon}
-                            </span>
-                            {platform.shortLabel}
-                            {isConnected && (
-                              <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-emerald-400" />
-                            )}
-                          </button>
+                            <input
+                              type="checkbox"
+                              className="mt-1"
+                              checked={checked}
+                              disabled={!host.configured || distributing}
+                              onChange={() => toggleHost(host.key)}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium">{host.label}</span>
+                                <span
+                                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                    host.configured
+                                      ? "bg-emerald-100 text-emerald-700"
+                                      : "bg-[#ededf9] text-[#737686]"
+                                  }`}
+                                >
+                                  {host.configured ? "Configured" : "Missing API key"}
+                                </span>
+                              </div>
+                              {existing?.url && (
+                                <a
+                                  href={existing.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="mt-1 block truncate text-[11px] text-[#004ac6] underline"
+                                >
+                                  {existing.url}
+                                </a>
+                              )}
+                              {existing?.status === "error" && existing.error && (
+                                <p className="mt-1 text-[11px] text-red-600">{existing.error}</p>
+                              )}
+                            </div>
+                          </label>
                         )
                       })}
                     </div>
-                  </div>
 
-                  {/* Not connected warning */}
-                  {!connectedAccounts[selectedPlatform] && (
-                    <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-700">
-                      <svg className="h-4 w-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                      </svg>
-                      {`Connect your ${PLATFORMS.find(p => p.key === selectedPlatform)?.shortLabel} account above to publish.`}
-                    </div>
-                  )}
-
-                  {/* Selected clip preview */}
-                  {selectedClip && (
-                    <div className="mb-5 flex items-center gap-3 rounded-lg bg-[#faf8ff] p-3">
-                      <div className="h-10 w-16 flex-shrink-0 overflow-hidden rounded bg-[#ededf9]">
-                        {selectedClip.thumbnail_url ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={selectedClip.thumbnail_url}
-                            alt="Selected clip"
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <div className="flex h-full items-center justify-center text-[9px] text-[#737686]">
-                            No preview
-                          </div>
-                        )}
-                      </div>
-                      <div>
-                        <p className="text-xs font-medium text-[#191b23]">
-                          {selectedClip.label ||
-                            `Clip ${formatDuration(selectedClip.start_time)} – ${formatDuration(selectedClip.end_time)}`}
-                        </p>
-                        <p className="text-[11px] text-[#737686]">{formatDuration(selectedClip.duration)}</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Title */}
-                  <div className="mb-4">
-                    <label className="mb-1.5 block text-xs font-medium uppercase text-[#737686]">
-                      Title <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      value={publishTitle}
-                      onChange={(e) => setPublishTitle(e.target.value)}
-                      placeholder="Enter a catchy title..."
-                      maxLength={100}
-                      className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none transition-colors focus:border-[#004ac6]"
-                    />
-                    <p className="mt-1 text-right text-[10px] text-[#b0b3c6]">{publishTitle.length}/100</p>
-                  </div>
-
-                  {/* Description */}
-                  <div className="mb-6">
-                    <label className="mb-1.5 block text-xs font-medium uppercase text-[#737686]">
-                      Description
-                    </label>
-                    <textarea
-                      value={publishDescription}
-                      onChange={(e) => setPublishDescription(e.target.value)}
-                      rows={3}
-                      maxLength={500}
-                      placeholder="Add a description, hashtags..."
-                      className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none transition-colors focus:border-[#004ac6]"
-                    />
-                    <p className="mt-1 text-right text-[10px] text-[#b0b3c6]">{publishDescription.length}/500</p>
-                  </div>
-
-                  {/* Publish button */}
-                  <button
-                    type="button"
-                    onClick={handlePublish}
-                    disabled={isPublishing || !selectedClipId || !publishTitle.trim()}
-                    className="w-full rounded-lg bg-gradient-to-r from-[#004ac6] to-[#712ae2] py-2.5 text-sm font-medium text-white shadow-[0_4px_14px_0_rgba(0,74,198,0.39)] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60 transition-opacity"
-                  >
-                    {isPublishing ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                        Publishing...
-                      </span>
-                    ) : (
-                      `Publish to ${PLATFORMS.find((p) => p.key === selectedPlatform)?.label}`
-                    )}
-                  </button>
-
-                  {currentStatus?.status === "success" && (
-                    <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                      ✓ {currentStatus.message}
-                    </div>
-                  )}
-                  {currentStatus?.status === "error" && (
-                    <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                      ✗ {currentStatus.message}
-                    </div>
-                  )}
-                </section>
+                    <button
+                      type="button"
+                      onClick={handleDistribute}
+                      disabled={distributing || !selectedClipId || selectedHosts.length === 0}
+                      className="w-full rounded-lg border border-[#004ac6] bg-white py-2.5 text-sm font-medium text-[#004ac6] hover:bg-[#f0f5ff] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {distributing ? "Uploading to hosts…" : "Upload to selected hosts"}
+                    </button>
+                  </section>
+                </div>
               </div>
             )}
           </>
         )}
 
-        {/* ─── HISTORY TAB ─── */}
         {activeTab === "history" && (
           <>
             <div className="mb-6">
               <h1 className="text-2xl font-bold">Publish History</h1>
               <p className="mt-1 text-sm text-[#434655]">
-                All your past publish attempts for this project.
+                Social publishes and file-host uploads for this session.
               </p>
             </div>
 
             {publishHistory.length === 0 ? (
               <div className="rounded-xl border border-dashed border-[#c3c6d7] bg-white p-12 text-center">
-                <div className="mb-3 text-3xl">📭</div>
                 <p className="text-sm font-medium text-[#737686]">No publish history yet.</p>
-                <p className="mt-1 text-xs text-[#b0b3c6]">Published clips will appear here.</p>
                 <button
                   onClick={() => setActiveTab("publish")}
                   className="mt-4 rounded-lg bg-[#004ac6] px-4 py-2 text-sm font-medium text-white hover:bg-[#003aa0]"
@@ -619,54 +801,58 @@ export default function PublishPage() {
               <div className="space-y-3">
                 {[...publishHistory].reverse().map((record, i) => {
                   const clip = clips.find((c) => (c.id || c._id) === record.clipId)
-                  const platform = PLATFORMS.find((p) => p.key === record.target)!
+                  const platform = PLATFORMS.find((p) => p.key === record.target)
+                  const host = hosts.find((h) => h.key === record.target)
+                  const label = platform?.label || host?.label || String(record.target)
                   return (
                     <div
-                      key={i}
+                      key={`${record.clipId}-${record.target}-${i}`}
                       className={`flex items-center gap-4 rounded-xl border bg-white p-4 shadow-sm ${
                         record.status === "success" ? "border-emerald-100" : "border-red-100"
                       }`}
                     >
-                      {/* Thumbnail */}
                       <div className="h-12 w-20 flex-shrink-0 overflow-hidden rounded-lg bg-[#ededf9]">
                         {clip?.thumbnail_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={clip.thumbnail_url}
-                            alt="clip"
-                            className="h-full w-full object-cover"
-                          />
+                          <img src={clip.thumbnail_url} alt="clip" className="h-full w-full object-cover" />
                         ) : (
                           <div className="flex h-full items-center justify-center text-[9px] text-[#737686]">
                             No preview
                           </div>
                         )}
                       </div>
-
-                      {/* Info */}
-                      <div className="flex-1 min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">
-                          {clip?.label || `Clip ${formatDuration(clip?.start_time)} – ${formatDuration(clip?.end_time)}`}
+                          {clip?.label ||
+                            `Clip ${formatDuration(clip?.start_time)} – ${formatDuration(clip?.end_time)}`}
                         </p>
-                        <div className="mt-1 flex items-center gap-2">
-                          <span className={`flex items-center gap-1 text-xs ${platform.color}`}>
-                            {platform.icon}
-                            {platform.label}
-                          </span>
-                          <span className="text-[#c3c6d7]">·</span>
-                          <span className="text-[11px] text-[#737686]">{formatTimestamp(record.timestamp)}</span>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-[#737686]">
+                          <span>{label}</span>
+                          <span>·</span>
+                          <span>{formatTimestamp(record.timestamp)}</span>
                         </div>
+                        {record.url && (
+                          <a
+                            href={record.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 block truncate text-[11px] text-[#004ac6] underline"
+                          >
+                            {record.url}
+                          </a>
+                        )}
+                        {!record.url && record.message && (
+                          <p className="mt-1 truncate text-[11px] text-[#737686]">{record.message}</p>
+                        )}
                       </div>
-
-                      {/* Status badge */}
                       <div className="flex-shrink-0">
                         {record.status === "success" ? (
                           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
-                            ✓ Published
+                            Success
                           </span>
                         ) : (
                           <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700">
-                            ✗ Failed
+                            Failed
                           </span>
                         )}
                       </div>
@@ -679,15 +865,10 @@ export default function PublishPage() {
         )}
       </main>
 
-      {/* Toast */}
       {toast && (
         <div
-          className={`fixed bottom-6 left-1/2 z-[200] -translate-x-1/2 rounded-xl px-5 py-3 text-sm font-medium text-white shadow-lg transition-all ${
-            toast.type === "success"
-              ? "bg-emerald-600"
-              : toast.type === "error"
-              ? "bg-red-600"
-              : "bg-[#191b23]"
+          className={`fixed bottom-6 left-1/2 z-[200] -translate-x-1/2 rounded-xl px-5 py-3 text-sm font-medium text-white shadow-lg ${
+            toast.type === "success" ? "bg-emerald-600" : toast.type === "error" ? "bg-red-600" : "bg-[#191b23]"
           }`}
         >
           {toast.message}

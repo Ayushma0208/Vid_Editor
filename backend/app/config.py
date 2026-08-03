@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     ftp_password: str = ""
     ftp_remote_dir: str = "/"
     ftp_public_base_url: str = ""
+    krakenfiles_api_key: str = ""
+    krakenfiles_base_url: str = "https://krakenfiles.com"
+    uploadrar_api_key: str = ""
+    uploadrar_base_url: str = "https://uploadrar.com"
+    up4ever_api_key: str = ""
+    up4ever_base_url: str = "https://up-4ever.net"
 
     model_config = SettingsConfigDict(
         env_file=".env",

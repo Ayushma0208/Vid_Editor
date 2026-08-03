@@ -170,7 +170,13 @@ class PublishService:
         await self._oauth_collection().delete_one({"_id": state_doc["_id"]})
         return {"platform": "instagram", "status": "connected", "ig_user_id": ig_user_id}
 
-    async def upload_youtube(self, user_id: str, clip: Any, description: str = "") -> dict[str, Any]:
+    async def upload_youtube(
+        self,
+        user_id: str,
+        clip: Any,
+        description: str = "",
+        title: str = "",
+    ) -> dict[str, Any]:
         token = await self._token_collection().find_one({"user_id": user_id, "platform": "youtube"})
         if not token:
             raise ValueError("YouTube account is not connected")
@@ -183,7 +189,7 @@ class PublishService:
         cloudinary_service = CloudinaryService()
         await cloudinary_service.download_to_path(clip.cloudinary_clip_url, local_path)
 
-        title = clip.label or f"Clip {clip.id}"
+        title = (title or clip.label or f"Clip {clip.id}").strip()
         if clip.duration <= 60 and "#Shorts" not in title:
             title = f"{title} #Shorts"
 

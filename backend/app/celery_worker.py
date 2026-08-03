@@ -17,7 +17,12 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     broker_connection_retry_on_startup=True,
-    imports=("app.tasks.download_task", "app.tasks.clip_task", "app.tasks.publish_task"),
+    imports=(
+        "app.tasks.download_task",
+        "app.tasks.clip_task",
+        "app.tasks.publish_task",
+        "app.tasks.host_upload_task",
+    ),
 )
 
 worker_loop = None
