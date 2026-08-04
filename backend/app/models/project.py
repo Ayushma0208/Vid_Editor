@@ -13,6 +13,13 @@ class ProjectStatus(str, Enum):
     ERROR = "error"
 
 
+class SummaryStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    ERROR = "error"
+
+
 class Project(Document):
     user_id: str
     title: str
@@ -24,6 +31,9 @@ class Project(Document):
     cloudinary_folder: str
     duration_seconds: float | None = None
     thumbnail_url: str | None = None
+    summary: str | None = None
+    summary_status: SummaryStatus | None = None
+    summary_error: str | None = None
     metadata: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -115,6 +115,9 @@ export default function PublishPage() {
   const projectId = params.jobId as string
 
   const [clips, setClips] = useState<ClipData[]>([])
+  const [projectTitle, setProjectTitle] = useState("")
+  const [projectSummary, setProjectSummary] = useState("")
+  const [summaryStatus, setSummaryStatus] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedClipId, setSelectedClipId] = useState<string>("")
@@ -129,6 +132,7 @@ export default function PublishPage() {
   const [hosts, setHosts] = useState<HostInfo[]>(DEFAULT_HOSTS)
   const [selectedHosts, setSelectedHosts] = useState<HostKey[]>([])
   const [distributing, setDistributing] = useState(false)
+  const [publishingAll, setPublishingAll] = useState(false)
   const [connectingPlatform, setConnectingPlatform] = useState<PublishTarget | null>(null)
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null)
   const [activeTab, setActiveTab] = useState<"publish" | "history">("publish")
@@ -140,12 +144,22 @@ export default function PublishPage() {
 
   const loadClips = useCallback(async () => {
     try {
-      const response = await api.get(`/api/v1/projects/${projectId}/clips`)
-      const clipsData = Array.isArray(response.data) ? response.data : []
+      const [clipsRes, projectRes] = await Promise.all([
+        api.get(`/api/v1/projects/${projectId}/clips`),
+        api.get(`/api/v1/projects/${projectId}`),
+      ])
+      const clipsData = Array.isArray(clipsRes.data) ? clipsRes.data : []
       setClips(clipsData)
       if (clipsData.length > 0) {
         setSelectedClipId((prev) => prev || clipsData[0].id || clipsData[0]._id || "")
       }
+      const title = String(projectRes.data?.title || "")
+      const summary = String(projectRes.data?.summary || "")
+      setProjectTitle(title)
+      setProjectSummary(summary)
+      setSummaryStatus(projectRes.data?.summary_status || null)
+      setPublishTitle((prev) => prev || title)
+      setPublishDescription((prev) => prev || summary)
     } catch {
       setError("Could not load clips.")
     } finally {
@@ -248,7 +262,14 @@ export default function PublishPage() {
   }
 
   const handlePublish = async () => {
-    if (!selectedClipId || !publishTitle.trim()) return
+    const caption = publishDescription.trim() || projectSummary.trim()
+    const title =
+      publishTitle.trim() ||
+      selectedClip?.label ||
+      projectTitle ||
+      (selectedPlatform === "instagram" ? "Reel" : "")
+    if (!selectedClipId) return
+    if (selectedPlatform === "youtube" && !title.trim()) return
 
     const platform = PLATFORMS.find((p) => p.key === selectedPlatform)!
     if (!connectedAccounts[selectedPlatform]) {
@@ -261,6 +282,11 @@ export default function PublishPage() {
       return
     }
 
+    if (selectedPlatform === "instagram" && !caption) {
+      showToast("Generate a full-video summary first (or add a caption).", "error")
+      return
+    }
+
     upsertStatus({
       clipId: selectedClipId,
       target: selectedPlatform,
@@ -269,8 +295,8 @@ export default function PublishPage() {
 
     try {
       await api.post(`/api/v1/clips/${selectedClipId}/publish/${selectedPlatform}`, {
-        title: publishTitle.trim(),
-        description: publishDescription.trim(),
+        title,
+        description: caption,
       })
 
       const result = await pollPublishStatus(selectedClipId, selectedPlatform)
@@ -405,9 +431,48 @@ export default function PublishPage() {
     setSelectedHosts((prev) => (prev.includes(key) ? prev.filter((h) => h !== key) : [...prev, key]))
   }
 
+  const handlePublishAllInstagram = async () => {
+    if (!connectedAccounts.instagram) {
+      showToast("Connect your Instagram account first.", "error")
+      return
+    }
+    const caption = publishDescription.trim() || projectSummary.trim()
+    if (!caption) {
+      showToast("Generate a full-video summary first (Clips page), then publish.", "error")
+      return
+    }
+    const readyWithUrl = clips.filter(
+      (c) => (c.status || "").toLowerCase() === "ready" && c.cloudinary_clip_url
+    )
+    if (readyWithUrl.length === 0) {
+      showToast("No ready clips with Cloudinary URLs to publish.", "error")
+      return
+    }
+
+    setPublishingAll(true)
+    try {
+      const response = await api.post(`/api/v1/projects/${projectId}/publish/instagram`, {
+        title: publishTitle.trim() || projectTitle,
+        description: caption,
+      })
+      showToast(
+        response.data?.message ||
+          `Queued ${response.data?.clip_count || readyWithUrl.length} clips for Instagram.`,
+        "success"
+      )
+      await loadClips()
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      showToast(detail || "Could not queue Instagram publish-all.", "error")
+    } finally {
+      setPublishingAll(false)
+    }
+  }
+
   const currentStatus = getPublishStatus(selectedClipId, selectedPlatform)
   const isPublishing = currentStatus?.status === "publishing"
   const publishHistory = publishStatuses.filter((s) => s.status === "success" || s.status === "error")
+  const effectiveCaption = publishDescription.trim() || projectSummary.trim()
 
   if (loading) {
     return (
@@ -457,9 +522,44 @@ export default function PublishPage() {
             <div className="mb-6">
               <h1 className="text-2xl font-bold">Publish Clips</h1>
               <p className="mt-1 text-sm text-[#434655]">
-                Publish to Instagram Reels / YouTube Shorts, and upload the same clip to PPD file hosts in parallel.
+                Publish 60s clips to Instagram Reels. Each Reel bio uses the full-video summary.
               </p>
             </div>
+
+            <section className="mb-6 rounded-xl border border-[#e1e2ed] bg-white p-5 shadow-sm">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">Full video summary (Instagram bio)</h2>
+                {summaryStatus && (
+                  <span className="rounded-full bg-[#ededf9] px-2 py-0.5 text-[10px] font-semibold uppercase text-[#737686]">
+                    {summaryStatus}
+                  </span>
+                )}
+              </div>
+              {projectSummary ? (
+                <p className="text-sm text-[#434655] whitespace-pre-wrap">{projectSummary}</p>
+              ) : (
+                <p className="text-sm text-[#737686]">
+                  No summary yet. Generate it on the Clips page — it will be used as every Reel caption.
+                </p>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => router.push(`/project/${projectId}/clips`)}
+                  className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6]"
+                >
+                  Edit / generate on Clips
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePublishAllInstagram}
+                  disabled={publishingAll || !connectedAccounts.instagram || !effectiveCaption}
+                  className="rounded-lg bg-gradient-to-r from-pink-500 to-purple-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  {publishingAll ? "Queuing…" : "Publish all clips to Instagram"}
+                </button>
+              </div>
+            </section>
 
             {error && (
               <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -643,12 +743,12 @@ export default function PublishPage() {
 
                     <div className="mb-4">
                       <label className="mb-1.5 block text-xs font-medium uppercase text-[#737686]">
-                        Title <span className="text-red-500">*</span>
+                        Title {selectedPlatform === "youtube" && <span className="text-red-500">*</span>}
                       </label>
                       <input
                         value={publishTitle}
                         onChange={(e) => setPublishTitle(e.target.value)}
-                        placeholder="Enter a catchy title..."
+                        placeholder={selectedClip?.label || projectTitle || "Enter a catchy title..."}
                         maxLength={100}
                         className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none focus:border-[#004ac6]"
                       />
@@ -656,16 +756,19 @@ export default function PublishPage() {
 
                     <div className="mb-6">
                       <label className="mb-1.5 block text-xs font-medium uppercase text-[#737686]">
-                        Description / caption
+                        Description / Instagram bio
                       </label>
                       <textarea
                         value={publishDescription}
                         onChange={(e) => setPublishDescription(e.target.value)}
-                        rows={3}
-                        maxLength={500}
-                        placeholder="Add a description, hashtags..."
+                        rows={4}
+                        maxLength={2200}
+                        placeholder={projectSummary || "Full-video summary will be used as the Instagram caption..."}
                         className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none focus:border-[#004ac6]"
                       />
+                      <p className="mt-1 text-[11px] text-[#737686]">
+                        Defaults to the full-video summary. Part numbers are added automatically on Instagram.
+                      </p>
                     </div>
 
                     <button
@@ -674,7 +777,8 @@ export default function PublishPage() {
                       disabled={
                         isPublishing ||
                         !selectedClipId ||
-                        !publishTitle.trim() ||
+                        (selectedPlatform === "youtube" && !publishTitle.trim()) ||
+                        (selectedPlatform === "instagram" && !effectiveCaption) ||
                         !connectedAccounts[selectedPlatform] ||
                         !selectedClip?.cloudinary_clip_url
                       }

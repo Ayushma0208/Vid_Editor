@@ -13,6 +13,7 @@ from app.models.project import Project, ProjectStatus
 from app.services.ffmpeg_service import FfmpegService
 from app.services.ytdlp_service import YTDLPService
 from app.tasks.clip_task import start_local_clip_generation
+from app.tasks.summary_task import trigger_project_summary
 
 
 from app.utils.ffmpeg_utils import (
@@ -95,6 +96,12 @@ async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
     project.metadata = metadata
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
+
+    # Full-video summary for Instagram captions (runs in parallel with clipping).
+    try:
+        await trigger_project_summary(project_id)
+    except Exception:
+        pass
 
     if _ffmpeg_available():
         await start_local_clip_generation(project_id, settings.default_clip_duration_seconds)

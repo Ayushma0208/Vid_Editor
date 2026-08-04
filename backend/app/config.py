@@ -20,10 +20,14 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 1440
     temp_dir: str = "/tmp/videoedit"
-    default_clip_duration_seconds: int = 50  # 50 seconds per clip
+    default_clip_duration_seconds: int = 60  # 60 seconds per clip (Instagram Reels)
     max_upload_size_bytes: int = 5 * 1024 * 1024 * 1024  # 5 GB
     ad_clip_path: str = ""
     default_ad_duration_seconds: int = 10
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
+    summary_sample_seconds: int = 300  # first ~5 minutes for transcript/summary
+    instagram_publish_delay_seconds: int = 30  # delay between auto-published Reels
     frontend_url: str = "http://localhost:3000"
     yt_dlp_cookies_file: str = ""
     ftp_host: str = ""

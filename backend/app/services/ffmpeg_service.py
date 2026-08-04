@@ -191,6 +191,36 @@ class FfmpegService:
 
         return output_path
 
+    async def extract_audio_segment(
+        self,
+        input_path: str,
+        output_path: str,
+        start_time: float = 0.0,
+        duration_seconds: float = 300.0,
+    ) -> str:
+        """Extract a mono MP3 audio sample for transcription / summarization."""
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        await self._run_ffmpeg(
+            "-y",
+            "-ss",
+            str(max(0.0, start_time)),
+            "-t",
+            str(max(1.0, duration_seconds)),
+            "-i",
+            input_path,
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-b:a",
+            "64k",
+            output_path,
+        )
+        return output_path
+
     async def probe_duration(self, input_path: str) -> float | None:
         try:
             stdout = await self._run_ffprobe(

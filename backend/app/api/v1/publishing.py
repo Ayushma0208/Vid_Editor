@@ -8,13 +8,14 @@ from app.api.dependencies import get_current_user_id
 from app.celery_worker import celery_app
 from app.config import settings
 from app.database import database
-from app.models.clip import Clip
+from app.models.clip import Clip, ClipStatus
+from app.models.project import Project
 from app.services.krakenfiles_service import KrakenFilesService
 from app.services.publish_service import PublishService
 from app.services.up4ever_service import Up4everService
 from app.services.uploadrar_service import UploadrarService
 from app.tasks.host_upload_task import HOST_KEYS, host_upload_task
-from app.tasks.publish_task import publish_clip_task
+from app.tasks.publish_task import publish_all_instagram_task, publish_clip_task
 
 
 router = APIRouter(tags=["publishing"])
@@ -152,18 +153,85 @@ async def publish_clip_to_instagram(
         )
 
     payload = body or PublishBody()
+    title = payload.title.strip()
+    description = payload.description.strip()
+    if not description:
+        project = await Project.get(clip.project_id)
+        if project and project.summary:
+            description = project.summary
+    if not title:
+        title = (clip.label or "").strip()
+
     task = publish_clip_task.delay(
         "instagram",
         clip_id,
         user_id,
-        payload.title,
-        payload.description,
+        title,
+        description,
     )
     clip.publish_task_id = task.id
     clip.publish_platform = "instagram"
     clip.publish_status = "queued"
     await clip.save()
-    return {"task_id": task.id, "status": "queued"}
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "caption_preview": "\n\n".join([p for p in (title, description) if p])[:500],
+    }
+
+
+@router.post("/projects/{project_id}/publish/instagram")
+async def publish_all_project_clips_to_instagram(
+    project_id: str,
+    body: PublishBody | None = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    tokens = database["user_tokens"]
+    instagram = await tokens.find_one({"user_id": user_id, "platform": "instagram"})
+    if not instagram or not instagram.get("access_token") or not instagram.get("ig_user_id"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Instagram account is not connected",
+        )
+
+    ready_clips = await Clip.find(
+        Clip.project_id == project_id,
+        Clip.user_id == user_id,
+        Clip.status == ClipStatus.READY,
+    ).to_list()
+    publishable = [c for c in ready_clips if c.cloudinary_clip_url]
+    if not publishable:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No ready clips with Cloudinary URLs available to publish",
+        )
+
+    payload = body or PublishBody()
+    title = payload.title.strip() or (project.title or "")
+    description = payload.description.strip() or (project.summary or "")
+
+    task = publish_all_instagram_task.delay(project_id, user_id, title, description)
+    for clip in publishable:
+        clip.publish_task_id = task.id
+        clip.publish_platform = "instagram"
+        clip.publish_status = "queued"
+        await clip.save()
+
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "clip_count": len(publishable),
+        "delay_seconds": settings.instagram_publish_delay_seconds,
+        "using_full_video_summary": bool(description),
+        "message": (
+            f"Queued {len(publishable)} clips for Instagram. "
+            "Each Reel caption uses the full-video summary."
+        ),
+    }
 
 
 @router.get("/clips/{clip_id}/publish/status")

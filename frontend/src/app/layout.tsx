@@ -7,8 +7,8 @@ import QueryProvider from "@/components/layout/QueryProvider"
 const inter = Inter({ subsets: ["latin"] })
  
 export const metadata: Metadata = {
-  title: "Movie Clips — Split long videos into 50-second clips",
-  description: "Upload long videos and automatically cut them into 50-second clips",
+  title: "Movie Clips — Split long videos into 60-second clips",
+  description: "Upload long videos, cut them into 60-second clips, and publish to Instagram with a full-video summary",
 }
  
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -1,6 +1,6 @@
 # Movie Clips / Clip AI
 
-Upload long videos and automatically split them into 50-second clips.
+Upload long videos, automatically split them into 60-second clips, generate a full-video summary, and publish Reels to Instagram with that summary in the caption.
 
 ## Quick start (Docker)
 

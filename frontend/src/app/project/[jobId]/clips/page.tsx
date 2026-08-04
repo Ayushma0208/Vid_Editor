@@ -16,6 +16,9 @@ type ProjectData = {
   duration_seconds?: number | null
   yt_url?: string
   created_at?: string
+  summary?: string | null
+  summary_status?: string | null
+  summary_error?: string | null
   metadata?: Record<string, unknown> | null
 }
 
@@ -307,6 +310,7 @@ export default function ProjectClipsPage() {
   const [selectedClip, setSelectedClip] = useState<ClipData | null>(null)
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null)
   const [isDownloadingAll, setIsDownloadingAll] = useState(false)
@@ -336,23 +340,37 @@ export default function ProjectClipsPage() {
     loadProject()
   }, [loadProject, router, projectId])
 
-  // Poll while project is processing or clips are in progress
+  // Poll while project is processing, clips are in progress, or summary is generating
   useEffect(() => {
     const projectBusy = ["downloading", "pending"].includes((project?.status || "").toLowerCase())
+    const summaryBusy = ["pending", "processing"].includes((project?.summary_status || "").toLowerCase())
     const clipsBusy = clips.some((c) => {
       const s = (c.status || "").toLowerCase()
       return s === "processing" || s === "pending"
     })
-    if (!projectBusy && !clipsBusy) return
+    if (!projectBusy && !clipsBusy && !summaryBusy) return
     const interval = setInterval(loadProject, 5000)
     return () => clearInterval(interval)
-  }, [clips, project?.status, loadProject])
+  }, [clips, project?.status, project?.summary_status, loadProject])
 
   const handleClipDeleted = (clipId: string) => {
     setClips((prev) => prev.filter((c) => (c.id || c._id) !== clipId))
   }
 
-  const SEGMENT_50_SEC = 50
+  const SEGMENT_60_SEC = 60
+
+  const handleGenerateSummary = async () => {
+    setIsGeneratingSummary(true)
+    setError(null)
+    try {
+      await api.post(`/api/v1/projects/${projectId}/generate-summary`)
+      await loadProject()
+    } catch {
+      setError("Could not generate video summary.")
+    } finally {
+      setIsGeneratingSummary(false)
+    }
+  }
 
   const handleRetryProcessing = async () => {
     setIsRetrying(true)
@@ -368,7 +386,7 @@ export default function ProjectClipsPage() {
     }
   }
 
-  const handleGenerateClips = async (segmentSeconds: number = SEGMENT_50_SEC) => {
+  const handleGenerateClips = async (segmentSeconds: number = SEGMENT_60_SEC) => {
     setIsGenerating(true); setError(null)
     try {
       await api.post(`/api/v1/projects/${projectId}/generate-clips`, null, {
@@ -525,11 +543,11 @@ export default function ProjectClipsPage() {
           )}
           {canGenerate && (
             <button
-              onClick={() => handleGenerateClips(SEGMENT_50_SEC)}
+              onClick={() => handleGenerateClips(SEGMENT_60_SEC)}
               disabled={isGenerating}
               className="rounded-lg border border-[#5b6ef5]/30 bg-[#5b6ef5]/10 px-3 py-1.5 text-xs font-semibold text-[#5b6ef5] hover:bg-[#5b6ef5]/20 disabled:opacity-50 transition-all"
             >
-              {isGenerating ? "Generating…" : "Split into 50s clips"}
+              {isGenerating ? "Generating…" : "Split into 60s clips"}
             </button>
           )}
           <button
@@ -553,7 +571,7 @@ export default function ProjectClipsPage() {
               {isProcessingUpload
                 ? "Processing your video — this can take several minutes for large files…"
                 : clips.length === 0
-                ? "Upload complete — split the full video into 50-second clips"
+                ? "Upload complete — split the full video into 60-second clips"
                 : `${clips.length} clip${clips.length !== 1 ? "s" : ""} · ${readyCount} ready${errorCount ? ` · ${errorCount} error` : ""}`}
             </p>
           </div>
@@ -569,6 +587,49 @@ export default function ProjectClipsPage() {
                 <p className="text-xl font-black text-emerald-500">{readyCount}</p>
               </div>
             </div>
+          )}
+        </div>
+
+        {/* Full-video summary used as Instagram caption/bio */}
+        <div className="mb-6 rounded-xl border border-slate-200/70 bg-white px-4 py-4">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">Full video summary</h2>
+              <p className="text-[11px] text-slate-500">
+                Used as the Instagram Reel bio/caption for every clip from this video.
+              </p>
+            </div>
+            <button
+              onClick={handleGenerateSummary}
+              disabled={isGeneratingSummary || projectStatus === "downloading" || projectStatus === "pending"}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50"
+            >
+              {isGeneratingSummary || ["pending", "processing"].includes((project.summary_status || "").toLowerCase())
+                ? "Generating…"
+                : project.summary
+                  ? "Regenerate"
+                  : "Generate summary"}
+            </button>
+          </div>
+          {["pending", "processing"].includes((project.summary_status || "").toLowerCase()) ? (
+            <p className="text-sm text-slate-500 animate-pulse">Creating a short summary of the full video…</p>
+          ) : project.summary ? (
+            <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{project.summary}</p>
+          ) : (
+            <p className="text-sm text-slate-400">
+              No summary yet. Generate one after the video is ready — it will be posted in each Instagram caption.
+            </p>
+          )}
+          {project.summary_error && (
+            <p className="mt-2 text-xs text-amber-700">{project.summary_error}</p>
+          )}
+          {readyCount > 0 && (
+            <button
+              onClick={() => router.push(`/project/${projectId}/publish`)}
+              className="mt-3 text-xs font-semibold text-[#5b6ef5] hover:underline"
+            >
+              Publish clips to Instagram →
+            </button>
           )}
         </div>
 
@@ -593,10 +654,10 @@ export default function ProjectClipsPage() {
         {errorCount > 0 && canGenerate && (
           <div className="mb-6 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
             <p className="text-sm text-amber-700">
-              {errorCount} clip{errorCount !== 1 ? "s" : ""} failed earlier. Click &quot;Split into 50s clips&quot; to regenerate them.
+              {errorCount} clip{errorCount !== 1 ? "s" : ""} failed earlier. Click &quot;Split into 60s clips&quot; to regenerate them.
             </p>
             <button
-              onClick={() => handleGenerateClips(SEGMENT_50_SEC)}
+              onClick={() => handleGenerateClips(SEGMENT_60_SEC)}
               disabled={isGenerating}
               className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
             >
@@ -637,11 +698,11 @@ export default function ProjectClipsPage() {
             )}
             {canGenerate && (
               <button
-                onClick={() => handleGenerateClips(SEGMENT_50_SEC)}
+                onClick={() => handleGenerateClips(SEGMENT_60_SEC)}
                 disabled={isGenerating}
                 className="mt-5 flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-300/40 hover:opacity-90 disabled:opacity-50 transition-all"
               >
-                {isGenerating ? "Generating…" : "Split into 50s clips"}
+                {isGenerating ? "Generating…" : "Split into 60s clips"}
               </button>
             )}
           </div>

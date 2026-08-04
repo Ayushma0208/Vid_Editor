@@ -5,8 +5,39 @@ from beanie import PydanticObjectId
 
 from app.celery_worker import celery_app
 import app.celery_worker as cw
-from app.models.clip import Clip
+from app.config import settings
+from app.models.clip import Clip, ClipStatus
+from app.models.project import Project
 from app.services.publish_service import PublishService
+
+
+def _build_instagram_caption(
+    *,
+    title: str,
+    description: str,
+    project_summary: str | None,
+    clip_label: str | None,
+    part_index: int | None = None,
+    part_total: int | None = None,
+) -> str:
+    summary = (description or project_summary or "").strip()
+    parts: list[str] = []
+
+    heading = (title or "").strip()
+    if not heading and clip_label:
+        heading = clip_label.strip()
+    if heading:
+        parts.append(heading)
+
+    if summary:
+        parts.append(summary)
+
+    if part_index and part_total and part_total > 1:
+        parts.append(f"Part {part_index}/{part_total}")
+
+    caption = "\n\n".join(parts).strip()
+    # Instagram caption limit is 2200 characters.
+    return caption[:2200]
 
 
 async def _publish_clip(
@@ -39,8 +70,28 @@ async def _publish_clip(
             if file_path.exists():
                 file_path.unlink()
     elif platform == "instagram":
-        caption_parts = [part for part in (title, description) if part]
-        caption = "\n\n".join(caption_parts)
+        project = await Project.get(PydanticObjectId(clip.project_id))
+        project_summary = (project.summary if project else None) or ""
+
+        siblings = await Clip.find(
+            Clip.project_id == clip.project_id,
+            Clip.user_id == user_id,
+        ).sort("+start_time").to_list()
+        part_total = len(siblings) or None
+        part_index = None
+        for idx, sibling in enumerate(siblings, start=1):
+            if str(sibling.id) == str(clip.id):
+                part_index = idx
+                break
+
+        caption = _build_instagram_caption(
+            title=title,
+            description=description,
+            project_summary=project_summary,
+            clip_label=clip.label,
+            part_index=part_index,
+            part_total=part_total,
+        )
         result = await publish_service.upload_instagram(
             user_id=user_id,
             clip=clip,
@@ -55,6 +106,67 @@ async def _publish_clip(
     clip.publish_status = "published"
     await clip.save()
     return result
+
+
+async def _publish_all_instagram(
+    project_id: str,
+    user_id: str,
+    title: str = "",
+    description: str = "",
+) -> dict:
+    project = await Project.get(PydanticObjectId(project_id))
+    if not project or project.user_id != user_id:
+        raise RuntimeError("Project not found")
+
+    clips = await Clip.find(
+        Clip.project_id == project_id,
+        Clip.user_id == user_id,
+        Clip.status == ClipStatus.READY,
+    ).sort("+start_time").to_list()
+
+    published = 0
+    failed = 0
+    results: list[dict] = []
+    delay = max(0, int(settings.instagram_publish_delay_seconds or 0))
+
+    for index, clip in enumerate(clips):
+        clip_id = str(clip.id)
+        if not clip.cloudinary_clip_url:
+            failed += 1
+            results.append({"clip_id": clip_id, "status": "error", "error": "Missing Cloudinary URL"})
+            continue
+        try:
+            result = await _publish_clip(
+                platform="instagram",
+                clip_id=clip_id,
+                user_id=user_id,
+                title=(clip.label or title or project.title or ""),
+                description=description or (project.summary or ""),
+            )
+            published += 1
+            results.append({"clip_id": clip_id, "status": "published", "result": result})
+        except Exception as exc:
+            failed += 1
+            results.append({"clip_id": clip_id, "status": "error", "error": str(exc)})
+            async def _mark_error(cid: str = clip_id) -> None:
+                doc = await Clip.get(PydanticObjectId(cid))
+                if doc:
+                    doc.publish_platform = "instagram"
+                    doc.publish_status = "error"
+                    await doc.save()
+
+            await _mark_error()
+
+        if delay and index < len(clips) - 1:
+            await asyncio.sleep(delay)
+
+    return {
+        "project_id": project_id,
+        "total": len(clips),
+        "published": published,
+        "failed": failed,
+        "results": results,
+    }
 
 
 @celery_app.task(bind=True, name="publish_clip_task")
@@ -88,3 +200,22 @@ def publish_clip_task(
         loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
         loop.run_until_complete(_mark_error())
         raise exc
+
+
+@celery_app.task(bind=True, name="publish_all_instagram_task")
+def publish_all_instagram_task(
+    self,
+    project_id: str,
+    user_id: str,
+    title: str = "",
+    description: str = "",
+):
+    loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
+    return loop.run_until_complete(
+        _publish_all_instagram(
+            project_id=project_id,
+            user_id=user_id,
+            title=title,
+            description=description,
+        )
+    )

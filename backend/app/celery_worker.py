@@ -22,6 +22,7 @@ celery_app.conf.update(
         "app.tasks.clip_task",
         "app.tasks.publish_task",
         "app.tasks.host_upload_task",
+        "app.tasks.summary_task",
     ),
 )
 

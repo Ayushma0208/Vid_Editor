@@ -15,11 +15,12 @@ from app.config import settings
 from app.models.asset import Asset
 from app.models.caption import Caption
 from app.models.clip import Clip, ClipStatus, ClipType
-from app.models.project import Project, ProjectStatus
+from app.models.project import Project, ProjectStatus, SummaryStatus
 from app.services.ytdlp_service import YTDLPService
 from app.tasks.clip_task import trigger_auto_generate_clips
 from app.tasks.download_task import _run_download_pipeline, _set_project_error, download_video_task
 from app.services.project_upload import create_project_from_upload
+from app.tasks.summary_task import trigger_project_summary
 from app.tasks.upload_task import retry_upload_processing
 from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, get_ffmpeg_path, get_ffprobe_path
 
@@ -38,6 +39,10 @@ class CreateProjectRequest(BaseModel):
 
 class SeedDummyProjectRequest(BaseModel):
     file_name: str
+
+
+class UpdateSummaryRequest(BaseModel):
+    summary: str
 
 
 def serialize_document(doc: Any) -> dict[str, Any]:
@@ -388,6 +393,58 @@ async def generate_clips(
         "segment_seconds": segment_seconds,
         "message": f"Generating {segment_seconds}-second clips for the full video",
     }
+
+
+@router.post("/{project_id}/generate-summary")
+async def generate_summary(project_id: str, user_id: str = Depends(get_current_user_id)):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    local_path = Path(project.local_video_path) if project.local_video_path else None
+    has_video = bool(local_path and local_path.is_file())
+    has_source_text = bool((project.metadata or {}).get("description") or project.title)
+    if project.status != ProjectStatus.READY and not has_video and not has_source_text:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project video is not ready for summary generation",
+        )
+
+    trigger = await trigger_project_summary(project_id)
+    return {
+        "project_id": project_id,
+        "task_id": trigger.get("task_id"),
+        "execution_mode": trigger.get("execution_mode"),
+        "summary_status": trigger.get("summary_status"),
+        "message": "Generating full-video summary for Instagram captions",
+    }
+
+
+@router.patch("/{project_id}/summary")
+async def update_summary(
+    project_id: str,
+    payload: UpdateSummaryRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    summary = payload.summary.strip()
+    if not summary:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Summary cannot be empty")
+    if len(summary) > 2200:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Summary must be at most 2200 characters",
+        )
+
+    project.summary = summary
+    project.summary_status = SummaryStatus.READY
+    project.summary_error = None
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+    return serialize_document(project)
 
 
 @router.delete("/{project_id}")

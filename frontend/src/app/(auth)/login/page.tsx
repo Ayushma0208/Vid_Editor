@@ -74,7 +74,7 @@ export default function LoginPage() {
               Movie <span className="text-[#2563eb]">Clips</span>
             </h1>
           </div>
-          <p className="m-0 text-sm text-[#434655]">Upload long videos — get 50-second clips automatically.</p>
+          <p className="m-0 text-sm text-[#434655]">Upload long videos — get 60-second clips for Instagram automatically.</p>
         </div>
 
         <form className="space-y-6" onSubmit={onSubmit}>
