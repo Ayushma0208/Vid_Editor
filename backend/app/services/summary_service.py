@@ -76,6 +76,67 @@ class SummaryService:
             response.raise_for_status()
             return (response.text or "").strip()
 
+    def _sample_start_times(self, duration_seconds: float, total_budget: float) -> list[float]:
+        """Spread sample windows across the full video (start / middle / end)."""
+        segment = max(30.0, float(settings.summary_segment_seconds or 60))
+        max_segments = max(1, int(settings.summary_max_segments or 5))
+        duration = max(0.0, float(duration_seconds or 0))
+        budget = max(segment, float(total_budget or segment))
+
+        if duration <= segment + 1:
+            return [0.0]
+
+        # How many windows fit in the budget (capped).
+        count = min(max_segments, max(1, int(budget // segment)))
+        if count == 1:
+            return [0.0]
+
+        usable = max(0.0, duration - segment)
+        return [round(usable * i / (count - 1), 2) for i in range(count)]
+
+    async def _collect_transcript_samples(
+        self,
+        video_path: Path,
+        work_dir: Path,
+        duration_seconds: float | None,
+    ) -> str:
+        sample_budget = max(60, int(settings.summary_sample_seconds or 300))
+        segment = max(30.0, float(settings.summary_segment_seconds or 60))
+        duration = float(duration_seconds or 0)
+        if duration <= 0:
+            probed = await self._ffmpeg.probe_duration(str(video_path))
+            duration = float(probed or sample_budget)
+
+        starts = self._sample_start_times(duration, float(sample_budget))
+        parts: list[str] = []
+
+        for index, start in enumerate(starts):
+            audio_path = work_dir / f"summary_sample_{index}.mp3"
+            try:
+                window = min(segment, max(1.0, duration - start))
+                await self._ffmpeg.extract_audio_segment(
+                    str(video_path),
+                    str(audio_path),
+                    start_time=float(start),
+                    duration_seconds=float(window),
+                )
+                text = await self._transcribe_openai(audio_path)
+                text = (text or "").strip()
+                if text:
+                    label_m = int(start // 60)
+                    label_s = int(start % 60)
+                    parts.append(f"[~{label_m:02d}:{label_s:02d}] {text}")
+            except Exception:
+                logger.exception("Transcript sample failed at start=%.1fs", start)
+            finally:
+                if audio_path.exists():
+                    try:
+                        audio_path.unlink()
+                    except OSError:
+                        pass
+
+        return "\n\n".join(parts).strip()
+
     async def _summarize_openai(self, title: str, transcript: str, duration_seconds: float | None) -> str:
         api_key = (settings.openai_api_key or "").strip()
         if not api_key:
@@ -85,7 +146,8 @@ class SummaryService:
         user_prompt = (
             f"Video title: {title or 'Untitled'}\n"
             f"Full duration: {duration_label or 'unknown'}\n\n"
-            f"Transcript sample from the start of the video:\n{transcript[:6000]}"
+            f"Transcript samples from throughout the video (start / middle / end):\n"
+            f"{transcript[:12000]}"
         )
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(
@@ -161,24 +223,15 @@ class SummaryService:
         transcript = ""
         video_path = Path(local_video_path) if local_video_path else None
         if openai_key and video_path and video_path.is_file():
-            audio_path = work_dir / "summary_sample.mp3"
             try:
-                sample_seconds = max(60, int(settings.summary_sample_seconds or 300))
-                await self._ffmpeg.extract_audio_segment(
-                    str(video_path),
-                    str(audio_path),
-                    start_time=0.0,
-                    duration_seconds=float(sample_seconds),
+                work_dir.mkdir(parents=True, exist_ok=True)
+                transcript = await self._collect_transcript_samples(
+                    video_path,
+                    work_dir,
+                    duration_seconds,
                 )
-                transcript = await self._transcribe_openai(audio_path)
             except Exception:
                 logger.exception("Audio transcription failed; falling back to metadata summary")
-            finally:
-                if audio_path.exists():
-                    try:
-                        audio_path.unlink()
-                    except OSError:
-                        pass
 
         if openai_key and transcript:
             try:

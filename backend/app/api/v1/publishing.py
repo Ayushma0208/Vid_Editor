@@ -234,6 +234,128 @@ async def publish_all_project_clips_to_instagram(
     }
 
 
+def _instagram_publish_counts(clips: list[Clip]) -> dict[str, int]:
+    counts = {
+        "total": 0,
+        "publishable": 0,
+        "queued": 0,
+        "processing": 0,
+        "published": 0,
+        "error": 0,
+        "idle": 0,
+    }
+    for clip in clips:
+        counts["total"] += 1
+        if clip.cloudinary_clip_url and clip.status == ClipStatus.READY:
+            counts["publishable"] += 1
+        status_value = (clip.publish_status or "").lower().strip()
+        if status_value in ("queued", "processing", "published", "error"):
+            counts[status_value] += 1
+        else:
+            counts["idle"] += 1
+    counts["in_flight"] = counts["queued"] + counts["processing"]
+    counts["done"] = counts["published"] + counts["error"]
+    return counts
+
+
+@router.get("/projects/{project_id}/publish/instagram/status")
+async def get_project_instagram_publish_status(
+    project_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    clips = await Clip.find(
+        Clip.project_id == project_id,
+        Clip.user_id == user_id,
+        Clip.status == ClipStatus.READY,
+    ).sort("+start_time").to_list()
+
+    counts = _instagram_publish_counts(clips)
+    items = [
+        {
+            "clip_id": str(clip.id),
+            "label": clip.label,
+            "start_time": clip.start_time,
+            "publish_status": clip.publish_status,
+            "published_url": clip.published_url,
+            "has_cloudinary_url": bool(clip.cloudinary_clip_url),
+        }
+        for clip in clips
+    ]
+    return {
+        "project_id": project_id,
+        "counts": counts,
+        "delay_seconds": settings.instagram_publish_delay_seconds,
+        "clips": items,
+        "active": counts["in_flight"] > 0,
+    }
+
+
+@router.post("/projects/{project_id}/publish/instagram/retry")
+async def retry_failed_instagram_publishes(
+    project_id: str,
+    body: PublishBody | None = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    tokens = database["user_tokens"]
+    instagram = await tokens.find_one({"user_id": user_id, "platform": "instagram"})
+    if not instagram or not instagram.get("access_token") or not instagram.get("ig_user_id"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Instagram account is not connected",
+        )
+
+    failed = await Clip.find(
+        Clip.project_id == project_id,
+        Clip.user_id == user_id,
+        Clip.status == ClipStatus.READY,
+        Clip.publish_status == "error",
+    ).sort("+start_time").to_list()
+    retryable = [c for c in failed if c.cloudinary_clip_url]
+    if not retryable:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No failed Instagram publishes to retry",
+        )
+
+    payload = body or PublishBody()
+    title = payload.title.strip() or (project.title or "")
+    description = payload.description.strip() or (project.summary or "")
+
+    # Re-queue only failed clips via the same sequential publish-all worker path
+    # by temporarily marking others as already published/idle isn't needed —
+    # enqueue individual clip tasks so only failures are retried.
+    queued_ids: list[str] = []
+    for clip in retryable:
+        clip_id = str(clip.id)
+        task = publish_clip_task.delay(
+            "instagram",
+            clip_id,
+            user_id,
+            (clip.label or title or ""),
+            description,
+        )
+        clip.publish_task_id = task.id
+        clip.publish_platform = "instagram"
+        clip.publish_status = "queued"
+        await clip.save()
+        queued_ids.append(clip_id)
+
+    return {
+        "status": "queued",
+        "clip_count": len(queued_ids),
+        "clip_ids": queued_ids,
+        "message": f"Retrying {len(queued_ids)} failed Instagram publish(es).",
+    }
+
+
 @router.get("/clips/{clip_id}/publish/status")
 async def get_publish_status(
     clip_id: str,

@@ -311,6 +311,9 @@ export default function ProjectClipsPage() {
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
+  const [isEditingSummary, setIsEditingSummary] = useState(false)
+  const [summaryDraft, setSummaryDraft] = useState("")
+  const [isSavingSummary, setIsSavingSummary] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null)
   const [isDownloadingAll, setIsDownloadingAll] = useState(false)
@@ -361,6 +364,7 @@ export default function ProjectClipsPage() {
 
   const handleGenerateSummary = async () => {
     setIsGeneratingSummary(true)
+    setIsEditingSummary(false)
     setError(null)
     try {
       await api.post(`/api/v1/projects/${projectId}/generate-summary`)
@@ -369,6 +373,40 @@ export default function ProjectClipsPage() {
       setError("Could not generate video summary.")
     } finally {
       setIsGeneratingSummary(false)
+    }
+  }
+
+  const handleStartEditSummary = () => {
+    setSummaryDraft(project?.summary || "")
+    setIsEditingSummary(true)
+    setError(null)
+  }
+
+  const handleCancelEditSummary = () => {
+    setIsEditingSummary(false)
+    setSummaryDraft(project?.summary || "")
+  }
+
+  const handleSaveSummary = async () => {
+    const next = summaryDraft.trim()
+    if (!next) {
+      setError("Summary cannot be empty.")
+      return
+    }
+    if (next.length > 2200) {
+      setError("Summary must be 2200 characters or fewer (Instagram limit).")
+      return
+    }
+    setIsSavingSummary(true)
+    setError(null)
+    try {
+      await api.patch(`/api/v1/projects/${projectId}/summary`, { summary: next })
+      setIsEditingSummary(false)
+      await loadProject()
+    } catch (err: unknown) {
+      setError(getApiErrorDetail(err, "Could not save summary."))
+    } finally {
+      setIsSavingSummary(false)
     }
   }
 
@@ -599,25 +637,76 @@ export default function ProjectClipsPage() {
                 Used as the Instagram Reel bio/caption for every clip from this video.
               </p>
             </div>
-            <button
-              onClick={handleGenerateSummary}
-              disabled={isGeneratingSummary || projectStatus === "downloading" || projectStatus === "pending"}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50"
-            >
-              {isGeneratingSummary || ["pending", "processing"].includes((project.summary_status || "").toLowerCase())
-                ? "Generating…"
-                : project.summary
-                  ? "Regenerate"
-                  : "Generate summary"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {!isEditingSummary && (
+                <button
+                  onClick={handleStartEditSummary}
+                  disabled={
+                    isGeneratingSummary ||
+                    ["pending", "processing"].includes((project.summary_status || "").toLowerCase())
+                  }
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50"
+                >
+                  {project.summary ? "Edit" : "Write summary"}
+                </button>
+              )}
+              <button
+                onClick={handleGenerateSummary}
+                disabled={
+                  isGeneratingSummary ||
+                  isEditingSummary ||
+                  projectStatus === "downloading" ||
+                  projectStatus === "pending"
+                }
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50"
+              >
+                {isGeneratingSummary || ["pending", "processing"].includes((project.summary_status || "").toLowerCase())
+                  ? "Generating…"
+                  : project.summary
+                    ? "Regenerate"
+                    : "Generate summary"}
+              </button>
+            </div>
           </div>
           {["pending", "processing"].includes((project.summary_status || "").toLowerCase()) ? (
             <p className="text-sm text-slate-500 animate-pulse">Creating a short summary of the full video…</p>
+          ) : isEditingSummary ? (
+            <div>
+              <textarea
+                value={summaryDraft}
+                onChange={(e) => setSummaryDraft(e.target.value)}
+                rows={4}
+                maxLength={2200}
+                placeholder="Short bio for Instagram Reels — what the full video is about…"
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-300 focus:bg-white"
+              />
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <p className="text-[11px] text-slate-400">{summaryDraft.length}/2200</p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCancelEditSummary}
+                    disabled={isSavingSummary}
+                    className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveSummary}
+                    disabled={isSavingSummary || !summaryDraft.trim()}
+                    className="rounded-lg bg-[#1a73e8] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1557b0] disabled:opacity-50"
+                  >
+                    {isSavingSummary ? "Saving…" : "Save summary"}
+                  </button>
+                </div>
+              </div>
+            </div>
           ) : project.summary ? (
             <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{project.summary}</p>
           ) : (
             <p className="text-sm text-slate-400">
-              No summary yet. Generate one after the video is ready — it will be posted in each Instagram caption.
+              No summary yet. Generate or write one after the video is ready — it will be posted in each Instagram caption.
             </p>
           )}
           {project.summary_error && (

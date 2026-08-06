@@ -133,6 +133,16 @@ export default function PublishPage() {
   const [selectedHosts, setSelectedHosts] = useState<HostKey[]>([])
   const [distributing, setDistributing] = useState(false)
   const [publishingAll, setPublishingAll] = useState(false)
+  const [retryingFailed, setRetryingFailed] = useState(false)
+  const [publishProgress, setPublishProgress] = useState<{
+    queued: number
+    processing: number
+    published: number
+    error: number
+    publishable: number
+    in_flight: number
+    active: boolean
+  } | null>(null)
   const [connectingPlatform, setConnectingPlatform] = useState<PublishTarget | null>(null)
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null)
   const [activeTab, setActiveTab] = useState<"publish" | "history">("publish")
@@ -190,6 +200,24 @@ export default function PublishPage() {
     }
   }, [])
 
+  const loadPublishProgress = useCallback(async () => {
+    try {
+      const response = await api.get(`/api/v1/projects/${projectId}/publish/instagram/status`)
+      const counts = response.data?.counts || {}
+      setPublishProgress({
+        queued: Number(counts.queued || 0),
+        processing: Number(counts.processing || 0),
+        published: Number(counts.published || 0),
+        error: Number(counts.error || 0),
+        publishable: Number(counts.publishable || 0),
+        in_flight: Number(counts.in_flight || 0),
+        active: Boolean(response.data?.active),
+      })
+    } catch {
+      // Keep previous progress if status endpoint is unavailable.
+    }
+  }, [projectId])
+
   useEffect(() => {
     const token = localStorage.getItem("token")
     if (!token) {
@@ -198,7 +226,18 @@ export default function PublishPage() {
     }
     loadClips()
     loadAuthStatus()
-  }, [loadClips, loadAuthStatus, router])
+    loadPublishProgress()
+  }, [loadClips, loadAuthStatus, loadPublishProgress, router])
+
+  useEffect(() => {
+    const busy = publishingAll || retryingFailed || Boolean(publishProgress?.active)
+    if (!busy) return
+    const interval = setInterval(() => {
+      loadClips()
+      loadPublishProgress()
+    }, 4000)
+    return () => clearInterval(interval)
+  }, [publishingAll, retryingFailed, publishProgress?.active, loadClips, loadPublishProgress])
 
   useEffect(() => {
     const onFocus = () => {
@@ -460,7 +499,7 @@ export default function PublishPage() {
           `Queued ${response.data?.clip_count || readyWithUrl.length} clips for Instagram.`,
         "success"
       )
-      await loadClips()
+      await Promise.all([loadClips(), loadPublishProgress()])
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       showToast(detail || "Could not queue Instagram publish-all.", "error")
@@ -469,10 +508,42 @@ export default function PublishPage() {
     }
   }
 
+  const handleRetryFailedInstagram = async () => {
+    if (!connectedAccounts.instagram) {
+      showToast("Connect your Instagram account first.", "error")
+      return
+    }
+    const caption = publishDescription.trim() || projectSummary.trim()
+    if (!caption) {
+      showToast("Add or generate a summary caption first.", "error")
+      return
+    }
+    setRetryingFailed(true)
+    try {
+      const response = await api.post(`/api/v1/projects/${projectId}/publish/instagram/retry`, {
+        title: publishTitle.trim() || projectTitle,
+        description: caption,
+      })
+      showToast(response.data?.message || "Retrying failed publishes…", "success")
+      await Promise.all([loadClips(), loadPublishProgress()])
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      showToast(detail || "Could not retry failed publishes.", "error")
+    } finally {
+      setRetryingFailed(false)
+    }
+  }
+
   const currentStatus = getPublishStatus(selectedClipId, selectedPlatform)
   const isPublishing = currentStatus?.status === "publishing"
   const publishHistory = publishStatuses.filter((s) => s.status === "success" || s.status === "error")
   const effectiveCaption = publishDescription.trim() || projectSummary.trim()
+  const failedPublishCount =
+    publishProgress?.error ??
+    clips.filter((c) => (c.publish_status || "").toLowerCase() === "error").length
+  const progressTotal = Math.max(publishProgress?.publishable || 0, 1)
+  const progressDone = (publishProgress?.published || 0) + (publishProgress?.error || 0)
+  const progressPct = Math.min(100, Math.round((progressDone / progressTotal) * 100))
 
   if (loading) {
     return (
@@ -553,12 +624,58 @@ export default function PublishPage() {
                 <button
                   type="button"
                   onClick={handlePublishAllInstagram}
-                  disabled={publishingAll || !connectedAccounts.instagram || !effectiveCaption}
+                  disabled={
+                    publishingAll ||
+                    retryingFailed ||
+                    Boolean(publishProgress?.active) ||
+                    !connectedAccounts.instagram ||
+                    !effectiveCaption
+                  }
                   className="rounded-lg bg-gradient-to-r from-pink-500 to-purple-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
                 >
-                  {publishingAll ? "Queuing…" : "Publish all clips to Instagram"}
+                  {publishingAll
+                    ? "Queuing…"
+                    : publishProgress?.active
+                      ? "Publishing…"
+                      : "Publish all clips to Instagram"}
                 </button>
+                {failedPublishCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleRetryFailedInstagram}
+                    disabled={retryingFailed || publishingAll || Boolean(publishProgress?.active)}
+                    className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    {retryingFailed ? "Retrying…" : `Retry ${failedPublishCount} failed`}
+                  </button>
+                )}
               </div>
+
+              {publishProgress && (publishProgress.publishable > 0 || progressDone > 0) && (
+                <div className="mt-4 rounded-lg border border-[#e1e2ed] bg-[#f7f8fc] px-3 py-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold uppercase tracking-wide text-[#737686]">
+                    <span>Instagram publish progress</span>
+                    <span>
+                      {publishProgress.published} published
+                      {publishProgress.error > 0 ? ` · ${publishProgress.error} failed` : ""}
+                      {publishProgress.in_flight > 0
+                        ? ` · ${publishProgress.in_flight} in flight`
+                        : ""}
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-white">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-pink-500 to-purple-600 transition-all duration-500"
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+                  {publishProgress.active && (
+                    <p className="mt-2 text-[11px] text-[#737686] animate-pulse">
+                      Publishing Reels sequentially — stay on this page to watch progress.
+                    </p>
+                  )}
+                </div>
+              )}
             </section>
 
             {error && (

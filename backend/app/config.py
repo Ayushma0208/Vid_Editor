@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     default_ad_duration_seconds: int = 10
     openai_api_key: str = ""
     gemini_api_key: str = ""
-    summary_sample_seconds: int = 300  # first ~5 minutes for transcript/summary
+    # Total audio budget for Whisper (spread across start/middle/end samples).
+    summary_sample_seconds: int = 300
+    summary_segment_seconds: int = 60  # length of each sample window
+    summary_max_segments: int = 5  # cap number of windows (start → end)
     instagram_publish_delay_seconds: int = 30  # delay between auto-published Reels
     frontend_url: str = "http://localhost:3000"
     yt_dlp_cookies_file: str = ""
