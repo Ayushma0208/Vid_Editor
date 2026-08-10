@@ -14,6 +14,7 @@ type ClipData = {
   status?: string
   cloudinary_clip_url?: string | null
   thumbnail_url?: string | null
+  file_size_bytes?: number | null
   host_uploads?: Record<string, HostUploadState>
   publish_status?: string | null
   publish_platform?: string | null
@@ -22,6 +23,27 @@ type ClipData = {
 
 type PublishTarget = "youtube" | "instagram"
 type HostKey = "krakenfiles" | "uploadrar" | "up4ever"
+
+type BracketInfo = {
+  name: string
+  label: string
+}
+
+type HostRecommendation = {
+  key: HostKey
+  label: string
+  configured: boolean
+  role: "primary" | "backup" | null
+}
+
+type DistributeRecommendations = {
+  size_bytes: number
+  bracket: BracketInfo
+  primary: HostKey
+  backup: HostKey | null
+  recommended_hosts: HostKey[]
+  all_hosts: HostRecommendation[]
+}
 
 type HostUploadState = {
   status?: string
@@ -49,6 +71,17 @@ type HostInfo = {
   key: HostKey
   label: string
   configured: boolean
+  role?: "primary" | "backup" | null
+}
+
+const BYTES_MB = 1024 * 1024
+const BYTES_GB = 1024 * 1024 * 1024
+
+function formatBytes(bytes?: number | null) {
+  if (!bytes || bytes < 1) return "—"
+  if (bytes < BYTES_MB) return `${Math.round(bytes / 1024)} KB`
+  if (bytes < BYTES_GB) return `${(bytes / BYTES_MB).toFixed(1)} MB`
+  return `${(bytes / BYTES_GB).toFixed(2)} GB`
 }
 
 function formatDuration(totalSeconds?: number | null) {
@@ -131,6 +164,8 @@ export default function PublishPage() {
   })
   const [hosts, setHosts] = useState<HostInfo[]>(DEFAULT_HOSTS)
   const [selectedHosts, setSelectedHosts] = useState<HostKey[]>([])
+  const [recommendations, setRecommendations] = useState<DistributeRecommendations | null>(null)
+  const [loadingRecommendations, setLoadingRecommendations] = useState(false)
   const [distributing, setDistributing] = useState(false)
   const [publishingAll, setPublishingAll] = useState(false)
   const [retryingFailed, setRetryingFailed] = useState(false)
@@ -191,12 +226,29 @@ export default function PublishPage() {
           configured: Boolean(hostMap[host.key]),
         }))
       )
-      setSelectedHosts((prev) => {
-        if (prev.length > 0) return prev
-        return DEFAULT_HOSTS.map((h) => h.key).filter((key) => Boolean(hostMap[key]))
-      })
     } catch {
       // Keep prior UI state if auth status is unavailable.
+    }
+  }, [])
+
+  const loadRecommendations = useCallback(async (clipId: string) => {
+    if (!clipId) {
+      setRecommendations(null)
+      return
+    }
+    setLoadingRecommendations(true)
+    try {
+      const response = await api.get(`/api/v1/clips/${clipId}/distribute/recommendations`)
+      const data = response.data as DistributeRecommendations
+      setRecommendations(data)
+      const recommended = data.recommended_hosts.filter((key) =>
+        data.all_hosts.find((host) => host.key === key)?.configured
+      )
+      setSelectedHosts(recommended)
+    } catch {
+      setRecommendations(null)
+    } finally {
+      setLoadingRecommendations(false)
     }
   }, [])
 
@@ -247,10 +299,45 @@ export default function PublishPage() {
     return () => window.removeEventListener("focus", onFocus)
   }, [loadAuthStatus])
 
+  useEffect(() => {
+    if (!selectedClipId) {
+      setRecommendations(null)
+      return
+    }
+    loadRecommendations(selectedClipId)
+  }, [selectedClipId, loadRecommendations])
+
   const selectedClip = useMemo(
     () => clips.find((c) => (c.id || c._id) === selectedClipId),
     [clips, selectedClipId]
   )
+
+  const displayHosts = useMemo<HostInfo[]>(() => {
+    if (recommendations?.all_hosts) {
+      return recommendations.all_hosts.map((host) => ({
+        key: host.key,
+        label: host.label,
+        configured: host.configured,
+        role: host.role,
+      }))
+    }
+    return hosts
+  }, [recommendations, hosts])
+
+  const recommendedHosts = useMemo(() => {
+    if (!recommendations) return [] as HostKey[]
+    return recommendations.recommended_hosts.filter((key) =>
+      recommendations.all_hosts.find((host) => host.key === key)?.configured
+    )
+  }, [recommendations])
+
+  const selectionMatchesRecommended = useMemo(() => {
+    if (recommendedHosts.length === 0) return false
+    if (selectedHosts.length !== recommendedHosts.length) return false
+    return recommendedHosts.every((host) => selectedHosts.includes(host))
+  }, [selectedHosts, recommendedHosts])
+
+  const selectedClipSizeBytes = recommendations?.size_bytes ?? selectedClip?.file_size_bytes ?? null
 
   const handleConnectAccount = async (platform: PublishTarget) => {
     setConnectingPlatform(platform)
@@ -397,7 +484,9 @@ export default function PublishPage() {
   const handleDistribute = async () => {
     if (!selectedClipId || selectedHosts.length === 0) return
 
-    const configuredSelected = selectedHosts.filter((key) => hosts.find((h) => h.key === key)?.configured)
+    const configuredSelected = selectedHosts.filter((key) =>
+      displayHosts.find((host) => host.key === key)?.configured
+    )
     if (configuredSelected.length === 0) {
       showToast("No configured hosts selected. Add API keys in backend env.", "error")
       return
@@ -413,15 +502,16 @@ export default function PublishPage() {
     }
 
     try {
-      await api.post(`/api/v1/clips/${selectedClipId}/distribute`, {
-        hosts: configuredSelected,
-      })
+      const distributeBody = selectionMatchesRecommended
+        ? { mode: "auto" as const }
+        : { mode: "manual" as const, hosts: configuredSelected }
+      await api.post(`/api/v1/clips/${selectedClipId}/distribute`, distributeBody)
       const hostUploads = await pollDistributeStatus(selectedClipId, configuredSelected)
       const now = new Date().toISOString()
 
       for (const host of configuredSelected) {
         const state = hostUploads[host]
-        const label = hosts.find((h) => h.key === host)?.label || host
+        const label = displayHosts.find((h) => h.key === host)?.label || host
         if (state?.status === "ready" && state.url) {
           upsertStatus({
             clipId: selectedClipId,
@@ -468,6 +558,14 @@ export default function PublishPage() {
 
   const toggleHost = (key: HostKey) => {
     setSelectedHosts((prev) => (prev.includes(key) ? prev.filter((h) => h !== key) : [...prev, key]))
+  }
+
+  const applyRecommendedHosts = () => {
+    if (!recommendations) return
+    const recommended = recommendations.recommended_hosts.filter((key) =>
+      recommendations.all_hosts.find((host) => host.key === key)?.configured
+    )
+    setSelectedHosts(recommended)
   }
 
   const handlePublishAllInstagram = async () => {
@@ -929,13 +1027,50 @@ export default function PublishPage() {
                   </section>
 
                   <section className="rounded-xl border border-[#e1e2ed] bg-white p-6 shadow-sm">
-                    <h2 className="mb-1 text-base font-semibold">File Hosts</h2>
-                    <p className="mb-4 text-xs text-[#737686]">
-                      Upload the selected clip to KrakenFiles, Uploadrar, and Up-4ever in parallel.
-                    </p>
+                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h2 className="mb-1 text-base font-semibold">File Hosts</h2>
+                        <p className="text-xs text-[#737686]">
+                          Auto-routes by clip size to the best configured primary and backup hosts.
+                        </p>
+                      </div>
+                      {recommendations && (
+                        <button
+                          type="button"
+                          onClick={applyRecommendedHosts}
+                          disabled={distributing || selectionMatchesRecommended}
+                          className="rounded-lg border border-[#d4d7e8] px-3 py-1.5 text-xs font-medium text-[#004ac6] hover:bg-[#f0f5ff] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Use recommended
+                        </button>
+                      )}
+                    </div>
+
+                    {(selectedClipSizeBytes || recommendations) && (
+                      <div className="mb-4 rounded-lg border border-[#e8eaf5] bg-[#f7f8fc] px-3 py-2.5 text-xs text-[#434655]">
+                        {loadingRecommendations ? (
+                          "Loading size recommendations…"
+                        ) : recommendations ? (
+                          <>
+                            <span className="font-semibold">{formatBytes(selectedClipSizeBytes)}</span>
+                            <span className="mx-1.5 text-[#737686]">·</span>
+                            <span>
+                              {recommendations.bracket.name} ({recommendations.bracket.label})
+                            </span>
+                            {recommendedHosts.length > 0 && (
+                              <span className="mt-1 block text-[#737686]">
+                                Recommended: {recommendedHosts.map((key) => displayHosts.find((h) => h.key === key)?.label || key).join(", ")}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <>Clip size: {formatBytes(selectedClipSizeBytes)}</>
+                        )}
+                      </div>
+                    )}
 
                     <div className="mb-4 space-y-2">
-                      {hosts.map((host) => {
+                      {displayHosts.map((host) => {
                         const checked = selectedHosts.includes(host.key)
                         const existing = selectedClip?.host_uploads?.[host.key]
                         return (
@@ -953,8 +1088,18 @@ export default function PublishPage() {
                               onChange={() => toggleHost(host.key)}
                             />
                             <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
                                 <span className="text-sm font-medium">{host.label}</span>
+                                {host.role === "primary" && (
+                                  <span className="rounded-full bg-[#004ac6]/10 px-2 py-0.5 text-[10px] font-semibold text-[#004ac6]">
+                                    Primary
+                                  </span>
+                                )}
+                                {host.role === "backup" && (
+                                  <span className="rounded-full bg-[#712ae2]/10 px-2 py-0.5 text-[10px] font-semibold text-[#712ae2]">
+                                    Backup
+                                  </span>
+                                )}
                                 <span
                                   className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
                                     host.configured

@@ -18,7 +18,12 @@ from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project, ProjectStatus, SummaryStatus
 from app.services.ytdlp_service import YTDLPService
 from app.tasks.clip_task import trigger_auto_generate_clips
-from app.tasks.download_task import _run_download_pipeline, _set_project_error, download_video_task
+from app.tasks.download_task import (
+    _run_download_pipeline,
+    _run_refetch_pipeline,
+    _set_project_error,
+    download_video_task,
+)
 from app.services.project_upload import create_project_from_upload
 from app.tasks.summary_task import trigger_project_summary
 from app.tasks.upload_task import retry_upload_processing
@@ -128,6 +133,21 @@ async def _run_download_pipeline_background(project_id: str, video_url: str) -> 
         await _run_download_pipeline(project_id, video_url)
     except Exception as exc:
         await _set_project_error(project, str(exc))
+
+
+async def _run_refetch_pipeline_background(project_id: str, video_url: str) -> None:
+    project = await Project.get(project_id)
+    if not project:
+        return
+    try:
+        await _run_refetch_pipeline(project_id, video_url)
+    except Exception as exc:
+        await _set_project_error(project, str(exc))
+
+
+async def trigger_refetch_source(project_id: str, video_url: str) -> dict[str, Any]:
+    asyncio.create_task(_run_refetch_pipeline_background(project_id, video_url))
+    return {"task_id": None, "execution_mode": "local-background"}
 
 
 async def trigger_download(project_id: str, video_url: str) -> dict[str, Any]:
@@ -295,6 +315,8 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
 
     data = serialize_document(project)
     data["download_status"] = project.status
+    local_path = Path(project.local_video_path) if project.local_video_path else None
+    data["source_file_available"] = bool(local_path and local_path.is_file())
     return data
 
 
@@ -357,6 +379,61 @@ async def retry_download(project_id: str, user_id: str = Depends(get_current_use
     data["task_id"] = trigger["task_id"]
     data["execution_mode"] = trigger["execution_mode"]
     return data
+
+
+@router.post("/{project_id}/refetch-source")
+async def refetch_source(project_id: str, user_id: str = Depends(get_current_user_id)):
+    """Re-download the source video and re-process clips when local temp files were lost."""
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if not project.yt_url:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This project has no YouTube URL to re-download from.",
+        )
+
+    local_path = Path(project.local_video_path) if project.local_video_path else None
+    if local_path and local_path.is_file():
+        clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
+        missing_clips = [
+            c
+            for c in clips
+            if not (c.local_clip_path and Path(c.local_clip_path).is_file()) and not c.cloudinary_clip_url
+        ]
+        if not missing_clips:
+            return {
+                "project_id": project_id,
+                "message": "Source video and clip files are already available.",
+                "source_file_available": True,
+            }
+
+        from app.tasks.clip_task import run_clip_processing
+
+        for clip in missing_clips:
+            await run_clip_processing(project_id, str(clip.id))
+
+        return {
+            "project_id": project_id,
+            "message": f"Re-processed {len(missing_clips)} clip(s) from the existing source video.",
+            "reprocessed_clips": len(missing_clips),
+            "execution_mode": "inline",
+        }
+
+    if project.status == ProjectStatus.DOWNLOADING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Source video is already being re-downloaded. Please wait.",
+        )
+
+    trigger = await trigger_refetch_source(project_id, project.yt_url)
+    return {
+        "project_id": project_id,
+        "message": "Re-downloading source video and re-processing clips. This may take a few minutes.",
+        "task_id": trigger.get("task_id"),
+        "execution_mode": trigger.get("execution_mode"),
+    }
 
 
 @router.post("/{project_id}/generate-clips")

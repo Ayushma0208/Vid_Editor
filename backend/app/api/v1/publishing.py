@@ -1,7 +1,7 @@
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from celery.result import AsyncResult
 
 from app.api.dependencies import get_current_user_id
@@ -10,11 +10,18 @@ from app.config import settings
 from app.database import database
 from app.models.clip import Clip, ClipStatus
 from app.models.project import Project
-from app.services.krakenfiles_service import KrakenFilesService
+from app.services.ppd_routing import (
+    HOST_KEYS,
+    HOST_LABELS,
+    build_recommendations,
+    get_clip_size_bytes,
+    get_configured_hosts,
+    get_host_service,
+    get_bracket_table,
+    resolve_hosts_for_size,
+)
 from app.services.publish_service import PublishService
-from app.services.up4ever_service import Up4everService
-from app.services.uploadrar_service import UploadrarService
-from app.tasks.host_upload_task import HOST_KEYS, host_upload_task
+from app.tasks.host_upload_task import host_upload_task
 from app.tasks.publish_task import publish_all_instagram_task, publish_clip_task
 
 
@@ -27,7 +34,8 @@ class PublishBody(BaseModel):
 
 
 class DistributeBody(BaseModel):
-    hosts: list[str] = Field(default_factory=lambda: list(HOST_KEYS))
+    hosts: list[str] | None = None
+    mode: Literal["auto", "manual"] = "auto"
 
 
 @router.post("/auth/youtube")
@@ -84,11 +92,7 @@ async def get_auth_status(user_id: str = Depends(get_current_user_id)):
     return {
         "youtube": bool(youtube and youtube.get("access_token")),
         "instagram": bool(instagram and instagram.get("access_token") and instagram.get("ig_user_id")),
-        "hosts": {
-            "krakenfiles": KrakenFilesService().is_configured(),
-            "uploadrar": UploadrarService().is_configured(),
-            "up4ever": Up4everService().is_configured(),
-        },
+        "hosts": {key: get_host_service(key).is_configured() for key in HOST_KEYS},
         "cloudinary_configured": bool(
             settings.cloudinary_cloud_name and settings.cloudinary_api_key and settings.cloudinary_api_secret
         ),
@@ -100,10 +104,14 @@ async def get_distribute_hosts(user_id: str = Depends(get_current_user_id)):
     _ = user_id
     return {
         "hosts": [
-            {"key": "krakenfiles", "label": "KrakenFiles", "configured": KrakenFilesService().is_configured()},
-            {"key": "uploadrar", "label": "Uploadrar", "configured": UploadrarService().is_configured()},
-            {"key": "up4ever", "label": "Up-4ever", "configured": Up4everService().is_configured()},
-        ]
+            {
+                "key": key,
+                "label": HOST_LABELS[key],
+                "configured": get_host_service(key).is_configured(),
+            }
+            for key in HOST_KEYS
+        ],
+        "brackets": get_bracket_table(),
     }
 
 
@@ -386,6 +394,25 @@ async def get_publish_status(
     }
 
 
+@router.get("/clips/{clip_id}/distribute/recommendations")
+async def get_distribute_recommendations(
+    clip_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    clip = await Clip.get(clip_id)
+    if not clip or clip.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+
+    size_bytes = get_clip_size_bytes(clip)
+    if size_bytes is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Clip file size is unavailable. Ensure the clip has a local file or Cloudinary URL.",
+        )
+
+    return build_recommendations(size_bytes)
+
+
 @router.post("/clips/{clip_id}/distribute")
 async def distribute_clip(
     clip_id: str,
@@ -396,14 +423,27 @@ async def distribute_clip(
     if not clip or clip.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
 
-    selected = [h for h in body.hosts if h in HOST_KEYS]
-    if not selected:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid hosts selected")
-
     if not clip.local_clip_path and not clip.cloudinary_clip_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Clip has no local file or Cloudinary URL to upload from",
+        )
+
+    if body.mode == "manual" or body.hosts:
+        selected = [h for h in (body.hosts or []) if h in HOST_KEYS]
+    else:
+        size_bytes = get_clip_size_bytes(clip)
+        configured = get_configured_hosts()
+        if size_bytes is None:
+            selected = [h for h in HOST_KEYS if h in configured]
+        else:
+            routing = resolve_hosts_for_size(size_bytes, configured)
+            selected = routing["recommended_hosts"]
+
+    if not selected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No valid configured hosts selected for distribute.",
         )
 
     uploads = dict(clip.host_uploads or {})
@@ -419,7 +459,12 @@ async def distribute_clip(
     task = host_upload_task.delay(clip_id, user_id, selected)
     clip.distribute_task_id = task.id
     await clip.save()
-    return {"task_id": task.id, "status": "queued", "hosts": selected}
+    return {
+        "task_id": task.id,
+        "status": "queued",
+        "hosts": selected,
+        "mode": body.mode,
+    }
 
 
 @router.get("/clips/{clip_id}/distribute/status")

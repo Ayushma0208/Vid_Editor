@@ -32,6 +32,7 @@ class Clip(Document):
     thumbnail_url: str | None = None
     local_clip_path: str | None = None
     local_thumbnail_path: str | None = None
+    file_size_bytes: int | None = None
     publish_task_id: str | None = None
     publish_platform: str | None = None
     publish_status: str | None = None

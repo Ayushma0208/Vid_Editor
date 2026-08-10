@@ -15,6 +15,7 @@ type ProjectData = {
   thumbnail_url?: string | null
   duration_seconds?: number | null
   yt_url?: string
+  source_file_available?: boolean
   created_at?: string
   summary?: string | null
   summary_status?: string | null
@@ -317,6 +318,7 @@ export default function ProjectClipsPage() {
   const [isRetrying, setIsRetrying] = useState(false)
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null)
   const [isDownloadingAll, setIsDownloadingAll] = useState(false)
+  const [isRefetchingSource, setIsRefetchingSource] = useState(false)
   const [saveNotice, setSaveNotice] = useState<string | null>(null)
 
   const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
@@ -421,6 +423,21 @@ export default function ProjectClipsPage() {
       setError(typeof detail === "string" ? detail : "Could not retry processing.")
     } finally {
       setIsRetrying(false)
+    }
+  }
+
+  const handleRefetchSource = async () => {
+    setIsRefetchingSource(true)
+    setError(null)
+    try {
+      const res = await api.post(`/api/v1/projects/${projectId}/refetch-source`)
+      const message = (res.data?.message as string | undefined) || "Re-fetching source video…"
+      setSaveNotice(message)
+      await loadProject()
+    } catch (err: unknown) {
+      setError(getApiErrorDetail(err, "Could not re-fetch source video."))
+    } finally {
+      setIsRefetchingSource(false)
     }
   }
 
@@ -532,6 +549,8 @@ export default function ProjectClipsPage() {
       ? "Video processing failed. Install FFmpeg, restart the backend, then click Retry processing."
       : null)
   const canGenerate = projectStatus === "ready" && !isProcessingUpload
+  const sourceMissing = project.source_file_available === false && !!project.yt_url
+  const needsRefetch = sourceMissing && readyCount > 0
 
   return (
     <div
@@ -728,6 +747,25 @@ export default function ProjectClipsPage() {
           </div>
         )}
 
+        {needsRefetch && (
+          <div className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm text-amber-800">
+              {projectStatus === "downloading" || isRefetchingSource
+                ? "Re-downloading source video and rebuilding clip files…"
+                : "Clip files are missing on the server (temp storage was cleared). Re-fetch the source video before saving to hosting."}
+            </p>
+            {projectStatus !== "downloading" && (
+              <button
+                onClick={handleRefetchSource}
+                disabled={isRefetchingSource}
+                className="flex-shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {isRefetchingSource ? "Refetching…" : "Refetch source"}
+              </button>
+            )}
+          </div>
+        )}
+
         {saveNotice && (
           <div className="mb-6 flex items-start justify-between gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3">
             <p className="text-sm text-emerald-800 break-all">{saveNotice}</p>
@@ -756,9 +794,20 @@ export default function ProjectClipsPage() {
         )}
 
         {error && (
-          <div className="mb-6 flex items-center justify-between rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
+          <div className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
             <p className="text-sm text-red-400">{error}</p>
-            <button onClick={() => setError(null)} className="text-red-400/60 hover:text-red-400 text-lg leading-none">✕</button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {needsRefetch && /missing|not available|refetch/i.test(error) && (
+                <button
+                  onClick={handleRefetchSource}
+                  disabled={isRefetchingSource || projectStatus === "downloading"}
+                  className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                  {isRefetchingSource ? "Refetching…" : "Refetch source"}
+                </button>
+              )}
+              <button onClick={() => setError(null)} className="text-red-400/60 hover:text-red-400 text-lg leading-none">✕</button>
+            </div>
           </div>
         )}
 

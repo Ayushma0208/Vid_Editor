@@ -68,7 +68,26 @@ async def _clip_bytes(clip: Clip) -> bytes:
             response.raise_for_status()
             return response.content
 
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not available")
+    project = await Project.get(clip.project_id)
+    if project and clip.status == ClipStatus.READY:
+        source = Path(project.local_video_path) if project.local_video_path else None
+        if source and source.is_file():
+            from app.tasks.clip_task import run_clip_processing
+
+            await run_clip_processing(clip.project_id, str(clip.id))
+            refreshed = await Clip.get(clip.id)
+            if refreshed and refreshed.local_clip_path:
+                path = Path(refreshed.local_clip_path)
+                if path.is_file():
+                    return await asyncio.to_thread(path.read_bytes)
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=(
+            "Clip file not available on the server. "
+            "Local temp storage may have been cleared — use Refetch source, then try again."
+        ),
+    )
 
 
 def validate_clip_window(payload: CreateClipRequest, project_duration_seconds: float | None) -> None:
@@ -405,10 +424,16 @@ async def save_all_project_clips_remote(
             errors.append({"clip_id": clip_id, "filename": name, "error": str(exc)})
 
     if not saved:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Could not upload any clips to hosting storage",
+        missing_files = errors and all(
+            "not available" in (entry.get("error") or "").lower() for entry in errors
         )
+        detail = (
+            "Clip files are missing on the server (local temp storage was cleared). "
+            "Use Refetch source to re-download the video, then save again."
+            if missing_files
+            else "Could not upload any clips to hosting storage"
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
 
     folder_url = f"{settings.ftp_public_base_url.rstrip('/')}/{subdir}"
     return {

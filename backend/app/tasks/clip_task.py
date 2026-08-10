@@ -220,6 +220,7 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
 
         clip.local_clip_path = saved_clip_path
         clip.local_thumbnail_path = saved_thumb_path
+        clip.file_size_bytes = Path(saved_clip_path).stat().st_size
         clip.status = ClipStatus.READY
 
         try:

@@ -12,29 +12,17 @@ import app.celery_worker as cw
 from app.config import settings
 from app.models.clip import Clip
 from app.services.cloudinary_service import CloudinaryService
-from app.services.krakenfiles_service import KrakenFilesService
-from app.services.up4ever_service import Up4everService
-from app.services.uploadrar_service import UploadrarService
-
-HOST_KEYS = ("krakenfiles", "uploadrar", "up4ever")
-
+from app.services.ppd_routing import HOST_KEYS, get_host_service
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_host_service(host: str) -> Any:
-    if host == "krakenfiles":
-        return KrakenFilesService()
-    if host == "uploadrar":
-        return UploadrarService()
-    if host == "up4ever":
-        return Up4everService()
-    raise ValueError(f"Unsupported host: {host}")
-
-
 async def _ensure_local_clip(clip: Clip) -> str:
     if clip.local_clip_path and Path(clip.local_clip_path).is_file():
+        if clip.file_size_bytes is None:
+            clip.file_size_bytes = Path(clip.local_clip_path).stat().st_size
+            await clip.save()
         return clip.local_clip_path
 
     if not clip.cloudinary_clip_url:
@@ -45,6 +33,7 @@ async def _ensure_local_clip(clip: Clip) -> str:
     local_path = str(temp_dir / "clip.mp4")
     await CloudinaryService().download_to_path(clip.cloudinary_clip_url, local_path)
     clip.local_clip_path = local_path
+    clip.file_size_bytes = Path(local_path).stat().st_size
     await clip.save()
     return local_path
 
@@ -60,7 +49,7 @@ async def _set_host_state(clip_id: str, host: str, payload: dict[str, Any]) -> N
 
 
 async def _upload_one(clip_id: str, host: str, local_path: str) -> dict[str, Any]:
-    service = _get_host_service(host)
+    service = get_host_service(host)
     if not service.is_configured():
         result = {"status": "skipped", "url": None, "error": "API key not configured"}
         await _set_host_state(clip_id, host, result)

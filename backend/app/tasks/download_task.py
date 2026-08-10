@@ -9,10 +9,11 @@ from celery.exceptions import MaxRetriesExceededError
 from app.celery_worker import celery_app
 import app.celery_worker as cw
 from app.config import settings
+from app.models.clip import Clip, ClipStatus
 from app.models.project import Project, ProjectStatus
 from app.services.ffmpeg_service import FfmpegService
 from app.services.ytdlp_service import YTDLPService
-from app.tasks.clip_task import start_local_clip_generation
+from app.tasks.clip_task import run_clip_processing, start_local_clip_generation
 from app.tasks.summary_task import trigger_project_summary
 
 
@@ -112,6 +113,58 @@ async def _run_download_pipeline(project_id: str, video_url: str) -> dict:
         "local_video_path": project.local_video_path,
         "title": project.title,
         "duration_seconds": project.duration_seconds,
+    }
+
+
+async def _run_refetch_pipeline(project_id: str, video_url: str) -> dict:
+    """Re-download source video and re-process existing clips (after temp storage was cleared)."""
+    project = await Project.get(PydanticObjectId(project_id))
+    if not project:
+        raise ValueError("Project not found")
+
+    project.status = ProjectStatus.DOWNLOADING
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+    ytdlp_service = YTDLPService()
+    output_template = str(Path(settings.temp_dir) / project_id / "raw_video.%(ext)s")
+
+    local_video_path = await ytdlp_service.download_video(
+        url=video_url,
+        output_path=output_template,
+        quality="1080p",
+    )
+
+    project.local_video_path = local_video_path
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+    await _enrich_project_from_download(project, video_url, local_video_path)
+
+    metadata = project.metadata or {}
+    metadata.pop("error_message", None)
+    metadata.pop("auto_clip_warning", None)
+    project.status = ProjectStatus.READY
+    project.metadata = metadata
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+    clips = (
+        await Clip.find(Clip.project_id == project_id, Clip.user_id == project.user_id)
+        .sort("start_time")
+        .to_list()
+    )
+    reprocessed = 0
+    for clip in clips:
+        if clip.status in (ClipStatus.READY, ClipStatus.ERROR, ClipStatus.PENDING, ClipStatus.PROCESSING):
+            await run_clip_processing(project_id, str(clip.id))
+            reprocessed += 1
+
+    return {
+        "project_id": project_id,
+        "status": project.status.value,
+        "local_video_path": project.local_video_path,
+        "reprocessed_clips": reprocessed,
     }
 
 
