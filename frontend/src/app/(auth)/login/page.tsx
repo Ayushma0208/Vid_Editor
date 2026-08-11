@@ -140,6 +140,15 @@ export default function LoginPage() {
               Register
             </a>
           </p>
+          <p className="mt-4 m-0 text-xs text-[#737686]">
+            <a className="hover:text-[#2563eb] hover:underline" href="/privacy">
+              Privacy Policy
+            </a>
+            {" · "}
+            <a className="hover:text-[#2563eb] hover:underline" href="/terms">
+              Terms of Service
+            </a>
+          </p>
         </div>
       </main>
     </div>
