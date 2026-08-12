@@ -923,10 +923,12 @@ export default function PublishPage() {
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {(qualityRows.length
                   ? qualityRows
-                  : (["240", "480", "720", "1080"] as const).map((quality) => ({
-                      quality,
-                      status: "pending",
-                    }))
+                  : (["240", "480", "720", "1080"] as const).map(
+                      (quality): QualityAssetRow => ({
+                        quality,
+                        status: "pending",
+                      }),
+                    )
                 ).map((row) => (
                   <div
                     key={row.quality}
