@@ -2,8 +2,10 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "frontend": {
-      "root": "frontend",
-      "framework": "nextjs"
+      "root": "frontend/",
+      "framework": "nextjs",
+      "installCommand": "npm install",
+      "buildCommand": "npm run build && ln -sfn \"$PWD/.next\" \"$PWD/../.next\""
     }
   },
   "rewrites": [
