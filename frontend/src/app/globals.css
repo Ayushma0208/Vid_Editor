@@ -117,6 +117,22 @@
   --sidebar-ring: #93c5fd;
 }
 
+.font-dm-sans {
+  font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+.font-syne {
+  font-family: Syne, ui-sans-serif, system-ui, sans-serif;
+}
+
+.font-jetbrains {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.font-sans {
+  font-family: Inter, "DM Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
