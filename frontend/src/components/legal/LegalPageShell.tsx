@@ -1,16 +1,6 @@
 import type { ReactNode } from "react"
 import Link from "next/link"
-import { DM_Sans, Syne } from "next/font/google"
-
-const dmSans = DM_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "700"],
-})
-
-const syne = Syne({
-  subsets: ["latin"],
-  weight: ["700", "800"],
-})
+import { dmSans, syne } from "@/lib/fonts"
 
 type LegalPageShellProps = {
   title: string

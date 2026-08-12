@@ -2,23 +2,8 @@
 
 import { FormEvent, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import { DM_Sans, JetBrains_Mono, Syne } from "next/font/google"
 import api from "@/lib/api"
-
-const dmSans = DM_Sans({
-  subsets: ["latin"],
-  weight: ["400", "500", "700"],
-})
-
-const syne = Syne({
-  subsets: ["latin"],
-  weight: ["700", "800"],
-})
-
-const jetBrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["500", "600"],
-})
+import { dmSans, jetBrainsMono, syne } from "@/lib/fonts"
 
 export default function SignupPage() {
   const router = useRouter()
