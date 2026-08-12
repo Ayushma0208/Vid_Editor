@@ -1,4 +1,27 @@
+import re
+import sys
+from pathlib import Path
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def normalize_temp_dir(value: str) -> str:
+    """Force a usable temp root on the current OS (reject Windows drive letters on Unix)."""
+    raw = (value or "").strip() or "/tmp/videoedit"
+    if sys.platform != "win32" and _WINDOWS_DRIVE_RE.match(raw):
+        print(
+            f"[config] TEMP_DIR={raw!r} is a Windows path; using /tmp/videoedit on this host.",
+            flush=True,
+        )
+        raw = "/tmp/videoedit"
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path("/tmp/videoedit")
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path.resolve())
 
 
 class Settings(BaseSettings):
@@ -61,6 +84,11 @@ class Settings(BaseSettings):
     uploadrar_base_url: str = "https://uploadrar.com"
     up4ever_api_key: str = ""
     up4ever_base_url: str = "https://up-4ever.net"
+
+    @field_validator("temp_dir", mode="before")
+    @classmethod
+    def _normalize_temp_dir(cls, value: object) -> str:
+        return normalize_temp_dir("" if value is None else str(value))
 
     model_config = SettingsConfigDict(
         env_file=".env",

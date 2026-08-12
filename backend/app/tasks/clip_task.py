@@ -1,7 +1,9 @@
 import asyncio
 import logging
 import math
+import re
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -55,9 +57,9 @@ def _higher_ready_source(project: Project, clip_key: str) -> tuple[str, str] | N
         if not key.isdigit() or int(key) <= clip_h:
             continue
         asset = assets.get(key) or {}
-        path = asset.get("local_path")
-        if asset.get("status") == "ready" and path and Path(str(path)).is_file():
-            candidates.append((int(key), key, str(path)))
+        path = _usable_local_media_path(asset.get("local_path"))
+        if asset.get("status") == "ready" and path:
+            candidates.append((int(key), key, path))
     if not candidates:
         return None
     candidates.sort(reverse=True)
@@ -65,17 +67,36 @@ def _higher_ready_source(project: Project, clip_key: str) -> tuple[str, str] | N
     return key, path
 
 
+def _usable_local_media_path(path: str | None) -> str | None:
+    """Return an absolute local path only if it exists and is valid on this OS."""
+    if not path:
+        return None
+    raw = str(path).strip()
+    if not raw:
+        return None
+    # Windows drive paths are not usable on macOS/Linux (FFmpeg treats C: as a protocol).
+    if sys.platform != "win32" and re.match(r"^[A-Za-z]:[\\/]", raw):
+        return None
+    candidate = Path(raw)
+    if not candidate.is_file():
+        return None
+    # Reject accidental cwd-relative junk like backend/C:\temp\...
+    if sys.platform != "win32" and re.search(r"[A-Za-z]:[\\/]", raw):
+        return None
+    return str(candidate.resolve())
+
+
 def _resolve_clip_source_path(project: Project) -> str | None:
     """Prefer configured clip quality; otherwise any higher ready ladder file or local path."""
     clip_key = quality_key(project.clip_source_quality or settings.clip_source_quality or "720")
     assets = project.quality_assets or {}
     asset = assets.get(clip_key) or {}
-    path = asset.get("local_path")
-    if asset.get("status") == "ready" and path and Path(str(path)).is_file():
-        return str(path)
+    path = _usable_local_media_path(asset.get("local_path"))
+    if asset.get("status") == "ready" and path:
+        return path
 
     higher = _higher_ready_source(project, clip_key)
-    if higher:
+    if higher and _usable_local_media_path(higher[1]):
         return higher[1]
 
     # Same-or-lower ready assets still usable for cutting when nothing else exists.
@@ -84,16 +105,14 @@ def _resolve_clip_source_path(project: Project) -> str | None:
         if not key.isdigit():
             continue
         item = assets.get(key) or {}
-        item_path = item.get("local_path")
-        if item.get("status") == "ready" and item_path and Path(str(item_path)).is_file():
-            fallbacks.append((int(key), str(item_path)))
+        item_path = _usable_local_media_path(item.get("local_path"))
+        if item.get("status") == "ready" and item_path:
+            fallbacks.append((int(key), item_path))
     if fallbacks:
         fallbacks.sort(reverse=True)
         return fallbacks[0][1]
 
-    if project.local_video_path and Path(project.local_video_path).is_file():
-        return project.local_video_path
-    return None
+    return _usable_local_media_path(project.local_video_path)
 
 
 async def ensure_clip_source_quality(project: Project) -> str | None:

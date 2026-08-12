@@ -409,8 +409,11 @@ async def refetch_source(project_id: str, user_id: str = Depends(get_current_use
             detail="This project has no YouTube URL to re-download from.",
         )
 
-    local_path = Path(project.local_video_path) if project.local_video_path else None
-    if local_path and local_path.is_file():
+    from app.tasks.clip_task import _resolve_clip_source_path, run_clip_processing
+
+    # Ignore Windows/local paths that aren't usable on this host (common after Mac→Render).
+    usable_source = _resolve_clip_source_path(project)
+    if usable_source:
         clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
         missing_clips = [
             c
@@ -423,8 +426,6 @@ async def refetch_source(project_id: str, user_id: str = Depends(get_current_use
                 "message": "Source video and clip files are already available.",
                 "source_file_available": True,
             }
-
-        from app.tasks.clip_task import run_clip_processing
 
         for clip in missing_clips:
             await run_clip_processing(project_id, str(clip.id))
