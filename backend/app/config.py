@@ -30,7 +30,23 @@ class Settings(BaseSettings):
     summary_sample_seconds: int = 300
     summary_segment_seconds: int = 60  # length of each sample window
     summary_max_segments: int = 5  # cap number of windows (start → end)
+    # External copy-pool API for ready-made Instagram captions.
+    copy_pool_base_url: str = ""
+    copy_pool_api_key: str = ""
     instagram_publish_delay_seconds: int = 30  # delay between auto-published Reels
+    # Non-AI clip interest scoring (audio energy + scene motion).
+    interest_audio_weight: float = 0.55
+    interest_motion_weight: float = 0.45
+    interest_scene_threshold: float = 0.3
+    interest_recommend_percentile: float = 0.25  # top 25% marked recommended
+    # Multi-quality full-movie pipeline
+    target_qualities: str = "240,480,720,1080"
+    quality_host_240: str = "uploadrar"
+    quality_host_480: str = "up4ever"
+    quality_host_720: str = "up4ever"
+    quality_host_1080: str = "krakenfiles"
+    clip_source_quality: str = "720"
+    clip_ttl_days: int = 7
     frontend_url: str = "http://localhost:3000"
     yt_dlp_cookies_file: str = ""
     ftp_host: str = ""

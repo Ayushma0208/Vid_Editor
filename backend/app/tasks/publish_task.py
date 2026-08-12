@@ -15,12 +15,11 @@ def _build_instagram_caption(
     *,
     title: str,
     description: str,
-    project_summary: str | None,
     clip_label: str | None,
     part_index: int | None = None,
     part_total: int | None = None,
 ) -> str:
-    summary = (description or project_summary or "").strip()
+    body = (description or "").strip()
     parts: list[str] = []
 
     heading = (title or "").strip()
@@ -29,8 +28,8 @@ def _build_instagram_caption(
     if heading:
         parts.append(heading)
 
-    if summary:
-        parts.append(summary)
+    if body:
+        parts.append(body)
 
     if part_index and part_total and part_total > 1:
         parts.append(f"Part {part_index}/{part_total}")
@@ -70,9 +69,6 @@ async def _publish_clip(
             if file_path.exists():
                 file_path.unlink()
     elif platform == "instagram":
-        project = await Project.get(PydanticObjectId(clip.project_id))
-        project_summary = (project.summary if project else None) or ""
-
         siblings = await Clip.find(
             Clip.project_id == clip.project_id,
             Clip.user_id == user_id,
@@ -87,7 +83,6 @@ async def _publish_clip(
         caption = _build_instagram_caption(
             title=title,
             description=description,
-            project_summary=project_summary,
             clip_label=clip.label,
             part_index=part_index,
             part_total=part_total,
@@ -113,16 +108,29 @@ async def _publish_all_instagram(
     user_id: str,
     title: str = "",
     description: str = "",
+    clip_ids: list[str] | None = None,
 ) -> dict:
     project = await Project.get(PydanticObjectId(project_id))
     if not project or project.user_id != user_id:
         raise RuntimeError("Project not found")
 
-    clips = await Clip.find(
+    ready_clips = await Clip.find(
         Clip.project_id == project_id,
         Clip.user_id == user_id,
         Clip.status == ClipStatus.READY,
     ).sort("+start_time").to_list()
+
+    if clip_ids:
+        wanted = {cid for cid in clip_ids if cid}
+        by_id = {str(c.id): c for c in ready_clips}
+        clips = [by_id[cid] for cid in clip_ids if cid in by_id]
+        # Keep request order when provided; fall back to chronological for extras.
+        if len(clips) != len(wanted):
+            missing = wanted - set(by_id.keys())
+            # Skip missing ids rather than aborting the whole batch.
+            _ = missing
+    else:
+        clips = ready_clips
 
     published = 0
     failed = 0
@@ -141,7 +149,7 @@ async def _publish_all_instagram(
                 clip_id=clip_id,
                 user_id=user_id,
                 title=(clip.label or title or project.title or ""),
-                description=description or (project.summary or ""),
+                description=description,
             )
             published += 1
             results.append({"clip_id": clip_id, "status": "published", "result": result})
@@ -209,6 +217,7 @@ def publish_all_instagram_task(
     user_id: str,
     title: str = "",
     description: str = "",
+    clip_ids: list[str] | None = None,
 ):
     loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
     return loop.run_until_complete(
@@ -217,5 +226,6 @@ def publish_all_instagram_task(
             user_id=user_id,
             title=title,
             description=description,
+            clip_ids=clip_ids,
         )
     )

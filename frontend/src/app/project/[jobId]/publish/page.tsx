@@ -15,6 +15,10 @@ type ClipData = {
   cloudinary_clip_url?: string | null
   thumbnail_url?: string | null
   file_size_bytes?: number | null
+  interest_score?: number | null
+  interest_audio?: number | null
+  interest_motion?: number | null
+  is_recommended?: boolean
   host_uploads?: Record<string, HostUploadState>
   publish_status?: string | null
   publish_platform?: string | null
@@ -51,6 +55,18 @@ type HostUploadState = {
   file_code?: string | null
   error?: string | null
   updated_at?: string | null
+}
+
+type QualityAssetRow = {
+  quality: string
+  status?: string | null
+  local_path?: string | null
+  file_size_bytes?: number | null
+  host?: string | null
+  host_configured?: boolean
+  host_status?: string | null
+  host_url?: string | null
+  host_error?: string | null
 }
 
 type PublishStatus = {
@@ -149,14 +165,18 @@ export default function PublishPage() {
 
   const [clips, setClips] = useState<ClipData[]>([])
   const [projectTitle, setProjectTitle] = useState("")
-  const [projectSummary, setProjectSummary] = useState("")
-  const [summaryStatus, setSummaryStatus] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedClipId, setSelectedClipId] = useState<string>("")
+  const [checkedClipIds, setCheckedClipIds] = useState<string[]>([])
+  const [clipListMode, setClipListMode] = useState<"recommended" | "chronological">("recommended")
   const [selectedPlatform, setSelectedPlatform] = useState<PublishTarget>("instagram")
+  const [publishingSelected, setPublishingSelected] = useState(false)
   const [publishTitle, setPublishTitle] = useState("")
   const [publishDescription, setPublishDescription] = useState("")
+  const [copyPoolCaptionId, setCopyPoolCaptionId] = useState<string | null>(null)
+  const [excludedCopyPoolIds, setExcludedCopyPoolIds] = useState<string[]>([])
+  const [loadingCaption, setLoadingCaption] = useState(false)
   const [publishStatuses, setPublishStatuses] = useState<PublishStatus[]>([])
   const [connectedAccounts, setConnectedAccounts] = useState<ConnectedAccount>({
     youtube: false,
@@ -169,6 +189,10 @@ export default function PublishPage() {
   const [distributing, setDistributing] = useState(false)
   const [publishingAll, setPublishingAll] = useState(false)
   const [retryingFailed, setRetryingFailed] = useState(false)
+  const [qualityRows, setQualityRows] = useState<QualityAssetRow[]>([])
+  const [clipsExpireAt, setClipsExpireAt] = useState<string | null>(null)
+  const [retryingQualities, setRetryingQualities] = useState(false)
+  const [showClipDistribute, setShowClipDistribute] = useState(false)
   const [publishProgress, setPublishProgress] = useState<{
     queued: number
     processing: number
@@ -187,6 +211,16 @@ export default function PublishPage() {
     setTimeout(() => setToast(null), 3500)
   }
 
+  const loadQualities = useCallback(async () => {
+    try {
+      const response = await api.get(`/api/v1/projects/${projectId}/qualities`)
+      setQualityRows(Array.isArray(response.data?.qualities) ? response.data.qualities : [])
+      setClipsExpireAt(response.data?.clips_expire_at || null)
+    } catch {
+      // Fall back to project payload quality_assets if dedicated endpoint fails.
+    }
+  }, [projectId])
+
   const loadClips = useCallback(async () => {
     try {
       const [clipsRes, projectRes] = await Promise.all([
@@ -197,14 +231,37 @@ export default function PublishPage() {
       setClips(clipsData)
       if (clipsData.length > 0) {
         setSelectedClipId((prev) => prev || clipsData[0].id || clipsData[0]._id || "")
+        setCheckedClipIds((prev) => {
+          if (prev.length > 0) return prev
+          const recommended = clipsData
+            .filter((c: ClipData) => c.is_recommended)
+            .map((c: ClipData) => c.id || c._id || "")
+            .filter(Boolean)
+          return recommended
+        })
       }
       const title = String(projectRes.data?.title || "")
-      const summary = String(projectRes.data?.summary || "")
       setProjectTitle(title)
-      setProjectSummary(summary)
-      setSummaryStatus(projectRes.data?.summary_status || null)
       setPublishTitle((prev) => prev || title)
-      setPublishDescription((prev) => prev || summary)
+      setClipsExpireAt(projectRes.data?.clips_expire_at || null)
+
+      const assets = projectRes.data?.quality_assets || {}
+      if (assets && typeof assets === "object") {
+        const rows: QualityAssetRow[] = ["240", "480", "720", "1080"].map((quality) => {
+          const asset = assets[quality] || {}
+          return {
+            quality,
+            status: asset.status,
+            local_path: asset.local_path,
+            file_size_bytes: asset.file_size_bytes,
+            host: asset.host,
+            host_status: asset.host_status,
+            host_url: asset.host_url,
+            host_error: asset.host_error,
+          }
+        })
+        setQualityRows(rows)
+      }
     } catch {
       setError("Could not load clips.")
     } finally {
@@ -270,6 +327,42 @@ export default function PublishPage() {
     }
   }, [projectId])
 
+  const fetchCopyPoolCaption = useCallback(
+    async (opts?: { skipCurrent?: boolean }) => {
+      setLoadingCaption(true)
+      try {
+        let exclude = excludedCopyPoolIds
+        if (opts?.skipCurrent && copyPoolCaptionId) {
+          exclude = [...excludedCopyPoolIds, copyPoolCaptionId].slice(-50)
+          setExcludedCopyPoolIds(exclude)
+        }
+        const params =
+          exclude.length > 0 ? { exclude: exclude.join(",") } : undefined
+        const response = await api.get("/api/v1/copy-pool/descriptions/random", { params })
+        const data = response.data?.data || {}
+        const text = String(data.description || "").trim()
+        if (!text) {
+          showToast("Copy pool returned an empty caption.", "error")
+          return
+        }
+        setPublishDescription(text)
+        setCopyPoolCaptionId(data.id ? String(data.id) : null)
+      } catch (err: unknown) {
+        const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+        let message = "Could not fetch caption from copy pool."
+        if (typeof detail === "string") {
+          message = detail
+        } else if (detail && typeof detail === "object" && "message" in detail) {
+          message = String((detail as { message?: string }).message || message)
+        }
+        showToast(message, "error")
+      } finally {
+        setLoadingCaption(false)
+      }
+    },
+    [copyPoolCaptionId, excludedCopyPoolIds]
+  )
+
   useEffect(() => {
     const token = localStorage.getItem("token")
     if (!token) {
@@ -279,17 +372,27 @@ export default function PublishPage() {
     loadClips()
     loadAuthStatus()
     loadPublishProgress()
-  }, [loadClips, loadAuthStatus, loadPublishProgress, router])
+    loadQualities()
+    void fetchCopyPoolCaption()
+  }, [loadClips, loadAuthStatus, loadPublishProgress, loadQualities, router]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const busy = publishingAll || retryingFailed || Boolean(publishProgress?.active)
+    const busy =
+      publishingAll || publishingSelected || retryingFailed || Boolean(publishProgress?.active)
     if (!busy) return
     const interval = setInterval(() => {
       loadClips()
       loadPublishProgress()
     }, 4000)
     return () => clearInterval(interval)
-  }, [publishingAll, retryingFailed, publishProgress?.active, loadClips, loadPublishProgress])
+  }, [
+    publishingAll,
+    publishingSelected,
+    retryingFailed,
+    publishProgress?.active,
+    loadClips,
+    loadPublishProgress,
+  ])
 
   useEffect(() => {
     const onFocus = () => {
@@ -311,6 +414,29 @@ export default function PublishPage() {
     () => clips.find((c) => (c.id || c._id) === selectedClipId),
     [clips, selectedClipId]
   )
+
+  const clipIdOf = (clip: ClipData) => clip.id || clip._id || ""
+
+  const recommendedClips = useMemo(
+    () => clips.filter((c) => c.is_recommended && c.cloudinary_clip_url),
+    [clips]
+  )
+
+  const displayedClips = useMemo(() => {
+    const sorted = [...clips]
+    if (clipListMode === "recommended") {
+      sorted.sort((a, b) => {
+        const rec = Number(Boolean(b.is_recommended)) - Number(Boolean(a.is_recommended))
+        if (rec !== 0) return rec
+        const scoreDiff = (b.interest_score ?? -1) - (a.interest_score ?? -1)
+        if (scoreDiff !== 0) return scoreDiff
+        return (a.start_time ?? 0) - (b.start_time ?? 0)
+      })
+    } else {
+      sorted.sort((a, b) => (a.start_time ?? 0) - (b.start_time ?? 0))
+    }
+    return sorted
+  }, [clips, clipListMode])
 
   const displayHosts = useMemo<HostInfo[]>(() => {
     if (recommendations?.all_hosts) {
@@ -388,7 +514,7 @@ export default function PublishPage() {
   }
 
   const handlePublish = async () => {
-    const caption = publishDescription.trim() || projectSummary.trim()
+    const caption = publishDescription.trim()
     const title =
       publishTitle.trim() ||
       selectedClip?.label ||
@@ -409,7 +535,7 @@ export default function PublishPage() {
     }
 
     if (selectedPlatform === "instagram" && !caption) {
-      showToast("Generate a full-video summary first (or add a caption).", "error")
+      showToast("Fetch a caption from the copy pool (or write your own).", "error")
       return
     }
 
@@ -573,16 +699,16 @@ export default function PublishPage() {
       showToast("Connect your Instagram account first.", "error")
       return
     }
-    const caption = publishDescription.trim() || projectSummary.trim()
+    const caption = publishDescription.trim()
     if (!caption) {
-      showToast("Generate a full-video summary first (Clips page), then publish.", "error")
+      showToast("Fetch a caption from the copy pool (or write your own), then publish.", "error")
       return
     }
-    const readyWithUrl = clips.filter(
-      (c) => (c.status || "").toLowerCase() === "ready" && c.cloudinary_clip_url
-    )
-    if (readyWithUrl.length === 0) {
-      showToast("No ready clips with Cloudinary URLs to publish.", "error")
+    if (recommendedClips.length === 0) {
+      showToast(
+        "No recommended clips yet. Regenerate clips to score interest, or select clips and publish selected.",
+        "error"
+      )
       return
     }
 
@@ -591,18 +717,99 @@ export default function PublishPage() {
       const response = await api.post(`/api/v1/projects/${projectId}/publish/instagram`, {
         title: publishTitle.trim() || projectTitle,
         description: caption,
+        recommended_only: true,
       })
       showToast(
         response.data?.message ||
-          `Queued ${response.data?.clip_count || readyWithUrl.length} clips for Instagram.`,
+          `Queued ${response.data?.clip_count || recommendedClips.length} recommended clips for Instagram.`,
         "success"
       )
       await Promise.all([loadClips(), loadPublishProgress()])
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-      showToast(detail || "Could not queue Instagram publish-all.", "error")
+      showToast(detail || "Could not queue Instagram publish.", "error")
     } finally {
       setPublishingAll(false)
+    }
+  }
+
+  const handlePublishSelectedInstagram = async () => {
+    if (!connectedAccounts.instagram) {
+      showToast("Connect your Instagram account first.", "error")
+      return
+    }
+    const caption = publishDescription.trim()
+    if (!caption) {
+      showToast("Fetch a caption from the copy pool (or write your own), then publish.", "error")
+      return
+    }
+    const selectedReady = checkedClipIds.filter((id) => {
+      const clip = clips.find((c) => clipIdOf(c) === id)
+      return clip && (clip.status || "").toLowerCase() === "ready" && clip.cloudinary_clip_url
+    })
+    if (selectedReady.length === 0) {
+      showToast("Select at least one ready clip with a Cloudinary URL.", "error")
+      return
+    }
+
+    setPublishingSelected(true)
+    try {
+      const response = await api.post(`/api/v1/projects/${projectId}/publish/instagram`, {
+        title: publishTitle.trim() || projectTitle,
+        description: caption,
+        clip_ids: selectedReady,
+        recommended_only: false,
+      })
+      showToast(
+        response.data?.message || `Queued ${response.data?.clip_count || selectedReady.length} selected clips.`,
+        "success"
+      )
+      await Promise.all([loadClips(), loadPublishProgress()])
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      showToast(detail || "Could not queue selected Instagram publishes.", "error")
+    } finally {
+      setPublishingSelected(false)
+    }
+  }
+
+  const toggleCheckedClip = (clipId: string) => {
+    setCheckedClipIds((prev) =>
+      prev.includes(clipId) ? prev.filter((id) => id !== clipId) : [...prev, clipId]
+    )
+  }
+
+  const selectRecommendedClips = () => {
+    setCheckedClipIds(
+      clips
+        .filter((c) => c.is_recommended)
+        .map(clipIdOf)
+        .filter(Boolean)
+    )
+  }
+
+  const selectAllClips = () => {
+    setCheckedClipIds(clips.map(clipIdOf).filter(Boolean))
+  }
+
+  const clearCheckedClips = () => {
+    setCheckedClipIds([])
+  }
+
+  const handleRetryQualityHosts = async () => {
+    setRetryingQualities(true)
+    try {
+      const response = await api.post(`/api/v1/projects/${projectId}/distribute/qualities`, {
+        only_failed: true,
+      })
+      showToast(response.data?.message || "Retrying full-movie host uploads…", "info")
+      await loadQualities()
+      await loadClips()
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      showToast(detail || "Could not retry quality host uploads.", "error")
+    } finally {
+      setRetryingQualities(false)
     }
   }
 
@@ -611,9 +818,9 @@ export default function PublishPage() {
       showToast("Connect your Instagram account first.", "error")
       return
     }
-    const caption = publishDescription.trim() || projectSummary.trim()
+    const caption = publishDescription.trim()
     if (!caption) {
-      showToast("Add or generate a summary caption first.", "error")
+      showToast("Fetch a caption from the copy pool (or write your own).", "error")
       return
     }
     setRetryingFailed(true)
@@ -635,7 +842,7 @@ export default function PublishPage() {
   const currentStatus = getPublishStatus(selectedClipId, selectedPlatform)
   const isPublishing = currentStatus?.status === "publishing"
   const publishHistory = publishStatuses.filter((s) => s.status === "success" || s.status === "error")
-  const effectiveCaption = publishDescription.trim() || projectSummary.trim()
+  const effectiveCaption = publishDescription.trim()
   const failedPublishCount =
     publishProgress?.error ??
     clips.filter((c) => (c.publish_status || "").toLowerCase() === "error").length
@@ -691,43 +898,118 @@ export default function PublishPage() {
             <div className="mb-6">
               <h1 className="text-2xl font-bold">Publish Clips</h1>
               <p className="mt-1 text-sm text-[#434655]">
-                Publish 60s clips to Instagram Reels. Each Reel bio uses the full-video summary.
+                Full movies go to file hosts by quality (240/480/720/1080). Popular clips are cut from
+                720p only and published to Instagram or YouTube.
               </p>
             </div>
 
             <section className="mb-6 rounded-xl border border-[#e1e2ed] bg-white p-5 shadow-sm">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold">Full video summary (Instagram bio)</h2>
-                {summaryStatus && (
-                  <span className="rounded-full bg-[#ededf9] px-2 py-0.5 text-[10px] font-semibold uppercase text-[#737686]">
-                    {summaryStatus}
-                  </span>
-                )}
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">Full movie qualities (hosts)</h2>
+                <button
+                  type="button"
+                  onClick={handleRetryQualityHosts}
+                  disabled={retryingQualities}
+                  className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6] disabled:opacity-50"
+                >
+                  {retryingQualities ? "Retrying…" : "Retry failed host uploads"}
+                </button>
               </div>
-              {projectSummary ? (
-                <p className="text-sm text-[#434655] whitespace-pre-wrap">{projectSummary}</p>
+              {clipsExpireAt && (
+                <p className="mb-3 text-[11px] text-[#737686]">
+                  Clips auto-delete after {formatTimestamp(clipsExpireAt)} (full-movie host links stay).
+                </p>
+              )}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {(qualityRows.length
+                  ? qualityRows
+                  : (["240", "480", "720", "1080"] as const).map((quality) => ({
+                      quality,
+                      status: "pending",
+                    }))
+                ).map((row) => (
+                  <div
+                    key={row.quality}
+                    className="rounded-lg border border-[#e1e2ed] bg-[#f7f8fc] px-3 py-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">{row.quality}p</p>
+                      <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase text-[#737686]">
+                        {row.status || "—"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-[#737686]">
+                      Host: {row.host || "—"} · {row.host_status || "pending"}
+                      {row.file_size_bytes ? ` · ${formatBytes(row.file_size_bytes)}` : ""}
+                    </p>
+                    {row.quality === "720" && (
+                      <p className="mt-1 text-[10px] font-semibold text-[#004ac6]">Clip source</p>
+                    )}
+                    {row.host_url ? (
+                      <a
+                        href={row.host_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 block truncate text-[11px] text-[#004ac6] underline"
+                      >
+                        {row.host_url}
+                      </a>
+                    ) : row.host_error ? (
+                      <p className="mt-1 text-[11px] text-amber-700">{row.host_error}</p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="mb-6 rounded-xl border border-[#e1e2ed] bg-white p-5 shadow-sm">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Instagram caption (copy pool)</h2>
+                  <p className="text-[11px] text-[#737686]">
+                    Ready-made caption used for every Reel from this publish.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void fetchCopyPoolCaption()}
+                    disabled={loadingCaption}
+                    className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6] disabled:opacity-50"
+                  >
+                    {loadingCaption ? "Loading…" : publishDescription ? "Refresh" : "Get caption"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void fetchCopyPoolCaption({ skipCurrent: true })}
+                    disabled={loadingCaption || !copyPoolCaptionId}
+                    className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6] disabled:opacity-50"
+                  >
+                    Skip / next
+                  </button>
+                </div>
+              </div>
+              {publishDescription ? (
+                <p className="text-sm text-[#434655] whitespace-pre-wrap">{publishDescription}</p>
               ) : (
                 <p className="text-sm text-[#737686]">
-                  No summary yet. Generate it on the Clips page — it will be used as every Reel caption.
+                  {loadingCaption
+                    ? "Fetching a caption from the copy pool…"
+                    : "No caption yet. Click Get caption, or write one in the form below."}
                 </p>
               )}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => router.push(`/project/${projectId}/clips`)}
-                  className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6]"
-                >
-                  Edit / generate on Clips
-                </button>
-                <button
-                  type="button"
                   onClick={handlePublishAllInstagram}
                   disabled={
                     publishingAll ||
+                    publishingSelected ||
                     retryingFailed ||
                     Boolean(publishProgress?.active) ||
                     !connectedAccounts.instagram ||
-                    !effectiveCaption
+                    !effectiveCaption ||
+                    recommendedClips.length === 0
                   }
                   className="rounded-lg bg-gradient-to-r from-pink-500 to-purple-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
                 >
@@ -735,13 +1017,36 @@ export default function PublishPage() {
                     ? "Queuing…"
                     : publishProgress?.active
                       ? "Publishing…"
-                      : "Publish all clips to Instagram"}
+                      : `Publish recommended (${recommendedClips.length})`}
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePublishSelectedInstagram}
+                  disabled={
+                    publishingAll ||
+                    publishingSelected ||
+                    retryingFailed ||
+                    Boolean(publishProgress?.active) ||
+                    !connectedAccounts.instagram ||
+                    !effectiveCaption ||
+                    checkedClipIds.length === 0
+                  }
+                  className="rounded-lg border border-pink-300 bg-pink-50 px-3 py-1.5 text-xs font-semibold text-pink-800 hover:bg-pink-100 disabled:opacity-50"
+                >
+                  {publishingSelected
+                    ? "Queuing…"
+                    : `Publish selected (${checkedClipIds.length})`}
                 </button>
                 {failedPublishCount > 0 && (
                   <button
                     type="button"
                     onClick={handleRetryFailedInstagram}
-                    disabled={retryingFailed || publishingAll || Boolean(publishProgress?.active)}
+                    disabled={
+                      retryingFailed ||
+                      publishingAll ||
+                      publishingSelected ||
+                      Boolean(publishProgress?.active)
+                    }
                     className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
                   >
                     {retryingFailed ? "Retrying…" : `Retry ${failedPublishCount} failed`}
@@ -842,68 +1147,144 @@ export default function PublishPage() {
             ) : (
               <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_1.2fr]">
                 <section>
-                  <h2 className="mb-3 text-base font-semibold">Select a Clip</h2>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-base font-semibold">Select clips</h2>
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setClipListMode("recommended")}
+                        className={`rounded-md px-2 py-1 text-[10px] font-semibold ${
+                          clipListMode === "recommended"
+                            ? "bg-[#004ac6] text-white"
+                            : "bg-[#ededf9] text-[#434655]"
+                        }`}
+                      >
+                        Recommended first
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setClipListMode("chronological")}
+                        className={`rounded-md px-2 py-1 text-[10px] font-semibold ${
+                          clipListMode === "chronological"
+                            ? "bg-[#004ac6] text-white"
+                            : "bg-[#ededf9] text-[#434655]"
+                        }`}
+                      >
+                        Chronological
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={selectRecommendedClips}
+                      className="rounded-md border border-[#e1e2ed] px-2 py-1 text-[10px] font-semibold text-[#434655] hover:border-[#004ac6]"
+                    >
+                      Select recommended
+                    </button>
+                    <button
+                      type="button"
+                      onClick={selectAllClips}
+                      className="rounded-md border border-[#e1e2ed] px-2 py-1 text-[10px] font-semibold text-[#434655] hover:border-[#004ac6]"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearCheckedClips}
+                      className="rounded-md border border-[#e1e2ed] px-2 py-1 text-[10px] font-semibold text-[#434655] hover:border-[#004ac6]"
+                    >
+                      Clear
+                    </button>
+                  </div>
                   <div className="space-y-3">
-                    {clips.map((clip) => {
-                      const clipId = clip.id || clip._id || ""
-                      const isSelected = clipId === selectedClipId
+                    {displayedClips.map((clip) => {
+                      const clipId = clipIdOf(clip)
+                      const isFocused = clipId === selectedClipId
+                      const isChecked = checkedClipIds.includes(clipId)
                       const ytStatus = getPublishStatus(clipId, "youtube")
                       const igStatus = getPublishStatus(clipId, "instagram")
+                      const scoreLabel =
+                        typeof clip.interest_score === "number"
+                          ? Math.round(clip.interest_score)
+                          : null
 
                       return (
-                        <button
+                        <div
                           key={clipId}
-                          type="button"
-                          onClick={() => setSelectedClipId(clipId)}
-                          className={`w-full rounded-xl border p-3 text-left transition-all ${
-                            isSelected
+                          className={`w-full rounded-xl border p-3 transition-all ${
+                            isFocused
                               ? "border-[#004ac6] bg-white shadow-md ring-2 ring-[#004ac6]/20"
                               : "border-[#e1e2ed] bg-white hover:border-[#004ac6]/40 hover:shadow-sm"
                           }`}
                         >
                           <div className="flex items-center gap-3">
-                            <div className="relative h-14 w-24 flex-shrink-0 overflow-hidden rounded-lg bg-[#ededf9]">
-                              {clip.thumbnail_url ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  src={clip.thumbnail_url}
-                                  alt={clip.label || "Clip"}
-                                  className="h-full w-full object-cover"
-                                />
-                              ) : (
-                                <div className="flex h-full items-center justify-center text-[10px] text-[#737686]">
-                                  No preview
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleCheckedClip(clipId)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="h-4 w-4 rounded border-[#c3c6d7] text-[#004ac6]"
+                              aria-label={`Select ${clip.label || clipId}`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setSelectedClipId(clipId)}
+                              className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                            >
+                              <div className="relative h-14 w-24 flex-shrink-0 overflow-hidden rounded-lg bg-[#ededf9]">
+                                {clip.thumbnail_url ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={clip.thumbnail_url}
+                                    alt={clip.label || "Clip"}
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="flex h-full items-center justify-center text-[10px] text-[#737686]">
+                                    No preview
+                                  </div>
+                                )}
+                                <div className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">
+                                  {formatDuration(clip.duration)}
                                 </div>
-                              )}
-                              <div className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[9px] text-white">
-                                {formatDuration(clip.duration)}
                               </div>
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate text-sm font-medium">
-                                {clip.label ||
-                                  `Clip ${formatDuration(clip.start_time)} – ${formatDuration(clip.end_time)}`}
-                              </p>
-                              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                                {!clip.cloudinary_clip_url && (
-                                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                                    No Cloudinary URL
-                                  </span>
-                                )}
-                                {ytStatus?.status === "success" && (
-                                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
-                                    YouTube
-                                  </span>
-                                )}
-                                {igStatus?.status === "success" && (
-                                  <span className="rounded-full bg-pink-100 px-2 py-0.5 text-[10px] font-semibold text-pink-700">
-                                    Instagram
-                                  </span>
-                                )}
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-medium">
+                                  {clip.label ||
+                                    `Clip ${formatDuration(clip.start_time)} – ${formatDuration(clip.end_time)}`}
+                                </p>
+                                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                  {clip.is_recommended && (
+                                    <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                                      Recommended
+                                    </span>
+                                  )}
+                                  {scoreLabel !== null && (
+                                    <span className="rounded-full bg-[#ededf9] px-2 py-0.5 text-[10px] font-semibold text-[#434655]">
+                                      Score {scoreLabel}
+                                    </span>
+                                  )}
+                                  {!clip.cloudinary_clip_url && (
+                                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                      No Cloudinary URL
+                                    </span>
+                                  )}
+                                  {ytStatus?.status === "success" && (
+                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                      YouTube
+                                    </span>
+                                  )}
+                                  {igStatus?.status === "success" && (
+                                    <span className="rounded-full bg-pink-100 px-2 py-0.5 text-[10px] font-semibold text-pink-700">
+                                      Instagram
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                            </div>
+                            </button>
                           </div>
-                        </button>
+                        </div>
                       )
                     })}
                   </div>
@@ -975,14 +1356,35 @@ export default function PublishPage() {
                       </label>
                       <textarea
                         value={publishDescription}
-                        onChange={(e) => setPublishDescription(e.target.value)}
+                        onChange={(e) => {
+                          setPublishDescription(e.target.value)
+                          setCopyPoolCaptionId(null)
+                        }}
                         rows={4}
                         maxLength={2200}
-                        placeholder={projectSummary || "Full-video summary will be used as the Instagram caption..."}
+                        placeholder="Fetch a ready-made caption, or write your own Instagram caption..."
                         className="w-full rounded-lg border border-[#d4d7e8] px-3 py-2 text-sm outline-none focus:border-[#004ac6]"
                       />
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void fetchCopyPoolCaption()}
+                          disabled={loadingCaption}
+                          className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6] disabled:opacity-50"
+                        >
+                          {loadingCaption ? "Loading…" : "Get caption"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void fetchCopyPoolCaption({ skipCurrent: true })}
+                          disabled={loadingCaption || !copyPoolCaptionId}
+                          className="rounded-lg border border-[#e1e2ed] px-3 py-1.5 text-xs font-semibold text-[#434655] hover:border-[#004ac6] hover:text-[#004ac6] disabled:opacity-50"
+                        >
+                          Skip / next
+                        </button>
+                      </div>
                       <p className="mt-1 text-[11px] text-[#737686]">
-                        Defaults to the full-video summary. Part numbers are added automatically on Instagram.
+                        Part numbers are added automatically on Instagram.
                       </p>
                     </div>
 
@@ -1026,117 +1428,108 @@ export default function PublishPage() {
                     )}
                   </section>
 
-                  <section className="rounded-xl border border-[#e1e2ed] bg-white p-6 shadow-sm">
-                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h2 className="mb-1 text-base font-semibold">File Hosts</h2>
-                        <p className="text-xs text-[#737686]">
-                          Auto-routes by clip size to the best configured primary and backup hosts.
-                        </p>
-                      </div>
-                      {recommendations && (
-                        <button
-                          type="button"
-                          onClick={applyRecommendedHosts}
-                          disabled={distributing || selectionMatchesRecommended}
-                          className="rounded-lg border border-[#d4d7e8] px-3 py-1.5 text-xs font-medium text-[#004ac6] hover:bg-[#f0f5ff] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          Use recommended
-                        </button>
-                      )}
-                    </div>
-
-                    {(selectedClipSizeBytes || recommendations) && (
-                      <div className="mb-4 rounded-lg border border-[#e8eaf5] bg-[#f7f8fc] px-3 py-2.5 text-xs text-[#434655]">
-                        {loadingRecommendations ? (
-                          "Loading size recommendations…"
-                        ) : recommendations ? (
-                          <>
-                            <span className="font-semibold">{formatBytes(selectedClipSizeBytes)}</span>
-                            <span className="mx-1.5 text-[#737686]">·</span>
-                            <span>
-                              {recommendations.bracket.name} ({recommendations.bracket.label})
-                            </span>
-                            {recommendedHosts.length > 0 && (
-                              <span className="mt-1 block text-[#737686]">
-                                Recommended: {recommendedHosts.map((key) => displayHosts.find((h) => h.key === key)?.label || key).join(", ")}
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <>Clip size: {formatBytes(selectedClipSizeBytes)}</>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="mb-4 space-y-2">
-                      {displayHosts.map((host) => {
-                        const checked = selectedHosts.includes(host.key)
-                        const existing = selectedClip?.host_uploads?.[host.key]
-                        return (
-                          <label
-                            key={host.key}
-                            className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 ${
-                              host.configured ? "border-[#e1e2ed] bg-white" : "border-[#ececf5] bg-[#f7f8fc] opacity-70"
-                            }`}
-                          >
-                            <input
-                              type="checkbox"
-                              className="mt-1"
-                              checked={checked}
-                              disabled={!host.configured || distributing}
-                              onChange={() => toggleHost(host.key)}
-                            />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-sm font-medium">{host.label}</span>
-                                {host.role === "primary" && (
-                                  <span className="rounded-full bg-[#004ac6]/10 px-2 py-0.5 text-[10px] font-semibold text-[#004ac6]">
-                                    Primary
-                                  </span>
-                                )}
-                                {host.role === "backup" && (
-                                  <span className="rounded-full bg-[#712ae2]/10 px-2 py-0.5 text-[10px] font-semibold text-[#712ae2]">
-                                    Backup
-                                  </span>
-                                )}
-                                <span
-                                  className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                                    host.configured
-                                      ? "bg-emerald-100 text-emerald-700"
-                                      : "bg-[#ededf9] text-[#737686]"
-                                  }`}
-                                >
-                                  {host.configured ? "Configured" : "Missing API key"}
-                                </span>
-                              </div>
-                              {existing?.url && (
-                                <a
-                                  href={existing.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="mt-1 block truncate text-[11px] text-[#004ac6] underline"
-                                >
-                                  {existing.url}
-                                </a>
-                              )}
-                              {existing?.status === "error" && existing.error && (
-                                <p className="mt-1 text-[11px] text-red-600">{existing.error}</p>
-                              )}
-                            </div>
-                          </label>
-                        )
-                      })}
-                    </div>
-
+                  <section className="rounded-xl border border-dashed border-[#c3c6d7] bg-white p-4 shadow-sm">
                     <button
                       type="button"
-                      onClick={handleDistribute}
-                      disabled={distributing || !selectedClipId || selectedHosts.length === 0}
-                      className="w-full rounded-lg border border-[#004ac6] bg-white py-2.5 text-sm font-medium text-[#004ac6] hover:bg-[#f0f5ff] disabled:cursor-not-allowed disabled:opacity-60"
+                      onClick={() => setShowClipDistribute((prev) => !prev)}
+                      className="flex w-full items-center justify-between text-left"
                     >
-                      {distributing ? "Uploading to hosts…" : "Upload to selected hosts"}
+                      <div>
+                        <h2 className="text-sm font-semibold text-[#737686]">Advanced: clip file-host upload</h2>
+                        <p className="mt-0.5 text-[11px] text-[#737686]">
+                          Not needed for the main flow — full movies are already hosted by quality above.
+                          Clips should go to Instagram/YouTube only.
+                        </p>
+                      </div>
+                      <span className="text-xs font-semibold text-[#004ac6]">
+                        {showClipDistribute ? "Hide" : "Show"}
+                      </span>
                     </button>
+
+                    {showClipDistribute && (
+                      <div className="mt-4 border-t border-[#e1e2ed] pt-4">
+                        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                          <p className="text-xs text-[#737686]">
+                            Legacy: upload a single clip to hosts by size bracket.
+                          </p>
+                          {recommendations && (
+                            <button
+                              type="button"
+                              onClick={applyRecommendedHosts}
+                              disabled={distributing || selectionMatchesRecommended}
+                              className="rounded-lg border border-[#d4d7e8] px-3 py-1.5 text-xs font-medium text-[#004ac6] hover:bg-[#f0f5ff] disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              Use recommended
+                            </button>
+                          )}
+                        </div>
+
+                        {(selectedClipSizeBytes || recommendations) && (
+                          <div className="mb-4 rounded-lg border border-[#e8eaf5] bg-[#f7f8fc] px-3 py-2.5 text-xs text-[#434655]">
+                            {loadingRecommendations ? (
+                              "Loading size recommendations…"
+                            ) : recommendations ? (
+                              <>
+                                <span className="font-semibold">{formatBytes(selectedClipSizeBytes)}</span>
+                                <span className="mx-1.5 text-[#737686]">·</span>
+                                <span>
+                                  {recommendations.bracket.name} ({recommendations.bracket.label})
+                                </span>
+                              </>
+                            ) : (
+                              <>Clip size: {formatBytes(selectedClipSizeBytes)}</>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="mb-4 space-y-2">
+                          {displayHosts.map((host) => {
+                            const checked = selectedHosts.includes(host.key)
+                            const existing = selectedClip?.host_uploads?.[host.key]
+                            return (
+                              <label
+                                key={host.key}
+                                className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 ${
+                                  host.configured
+                                    ? "border-[#e1e2ed] bg-white"
+                                    : "border-[#ececf5] bg-[#f7f8fc] opacity-70"
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="mt-1"
+                                  checked={checked}
+                                  disabled={!host.configured || distributing}
+                                  onChange={() => toggleHost(host.key)}
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <span className="text-sm font-medium">{host.label}</span>
+                                  {existing?.url && (
+                                    <a
+                                      href={existing.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="mt-1 block truncate text-[11px] text-[#004ac6] underline"
+                                    >
+                                      {existing.url}
+                                    </a>
+                                  )}
+                                </div>
+                              </label>
+                            )
+                          })}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleDistribute}
+                          disabled={distributing || !selectedClipId || selectedHosts.length === 0}
+                          className="w-full rounded-lg border border-[#004ac6] bg-white py-2.5 text-sm font-medium text-[#004ac6] hover:bg-[#f0f5ff] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {distributing ? "Uploading to hosts…" : "Upload clip to selected hosts"}
+                        </button>
+                      </div>
+                    )}
                   </section>
                 </div>
               </div>

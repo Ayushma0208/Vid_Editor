@@ -34,6 +34,10 @@ class Project(Document):
     summary: str | None = None
     summary_status: SummaryStatus | None = None
     summary_error: str | None = None
+    # Per-height full-movie assets: keys "240"|"480"|"720"|"1080"
+    quality_assets: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    clip_source_quality: str = "720"
+    clips_expire_at: datetime | None = None
     metadata: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

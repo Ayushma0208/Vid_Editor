@@ -16,15 +16,17 @@ from app.models.asset import Asset
 from app.models.caption import Caption
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project, ProjectStatus, SummaryStatus
+from app.services.project_upload import create_project_from_upload
+from app.services.quality_host_routing import build_quality_distribute_plan, quality_key
 from app.services.ytdlp_service import YTDLPService
-from app.tasks.clip_task import trigger_auto_generate_clips
+from app.tasks.clip_task import _resolve_clip_source_path, trigger_auto_generate_clips
 from app.tasks.download_task import (
     _run_download_pipeline,
     _run_refetch_pipeline,
     _set_project_error,
     download_video_task,
 )
-from app.services.project_upload import create_project_from_upload
+from app.tasks.quality_distribute_task import trigger_distribute_project_qualities
 from app.tasks.summary_task import trigger_project_summary
 from app.tasks.upload_task import retry_upload_processing
 from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, get_ffmpeg_path, get_ffprobe_path
@@ -169,11 +171,22 @@ async def create_project(
     payload: CreateProjectRequest,
     user_id: str = Depends(get_current_user_id),
 ):
-    yt_url = normalize_youtube_url(payload.yt_url.strip())
-    if not YOUTUBE_URL_PATTERN.match(yt_url):
+    raw_url = payload.yt_url.strip()
+    if not raw_url:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Invalid YouTube URL. Use youtube.com/watch?v=... or youtu.be/...",
+            detail="A video URL is required",
+        )
+
+    # YouTube URLs are normalized; other yt-dlp-compatible https URLs are accepted as-is.
+    if YOUTUBE_URL_PATTERN.match(raw_url):
+        yt_url = normalize_youtube_url(raw_url)
+    elif re.match(r"^https?://", raw_url, re.IGNORECASE):
+        yt_url = raw_url
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid URL. Use an https video URL that yt-dlp can process (rights-ok sources only).",
         )
 
     metadata: dict[str, Any] = {}
@@ -183,7 +196,7 @@ async def create_project(
     except Exception as exc:
         metadata_error = str(exc)
 
-    parsed_video_id = parse_video_id(yt_url) or str(metadata.get("id", ""))
+    parsed_video_id = parse_video_id(yt_url) or str(metadata.get("id", "")) or "source"
     now = datetime.now(timezone.utc)
 
     title = metadata.get("title") if metadata else None
@@ -199,8 +212,10 @@ async def create_project(
         cloudinary_folder=f"projects/{parsed_video_id or 'unknown'}/",
         duration_seconds=metadata.get("duration"),
         thumbnail_url=metadata.get("thumbnail"),
+        quality_assets={},
+        clip_source_quality=settings.clip_source_quality or "720",
         metadata={
-            **metadata,
+            **{k: v for k, v in (metadata or {}).items() if k != "formats"},
             **({"metadata_fetch_error": metadata_error} if metadata_error else {}),
         },
         created_at=now,
@@ -452,15 +467,23 @@ async def generate_clips(
             detail="Project must be ready before generating clips",
         )
 
-    local_path = Path(project.local_video_path) if project.local_video_path else None
-    if not local_path or not local_path.is_file():
+    clip_key = quality_key(project.clip_source_quality or settings.clip_source_quality or "720")
+    clip_source = _resolve_clip_source_path(project)
+    if not clip_source:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Downloaded video file is not available on the server",
+            detail=f"No local video available for clip generation (need {clip_key}p or another ready quality)",
         )
 
     if not segment_seconds or segment_seconds < 1:
         segment_seconds = settings.default_clip_duration_seconds
+
+    if (project.metadata or {}).get("auto_clip_warning"):
+        meta = dict(project.metadata or {})
+        meta.pop("auto_clip_warning", None)
+        project.metadata = meta
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
 
     trigger = await trigger_auto_generate_clips(project_id, segment_seconds)
     return {
@@ -468,7 +491,52 @@ async def generate_clips(
         "task_id": trigger.get("task_id"),
         "execution_mode": trigger.get("execution_mode"),
         "segment_seconds": segment_seconds,
-        "message": f"Generating {segment_seconds}-second clips for the full video",
+        "clip_source_quality": clip_key,
+        "message": f"Generating {segment_seconds}-second clips",
+    }
+
+
+@router.get("/{project_id}/qualities")
+async def get_project_qualities(project_id: str, user_id: str = Depends(get_current_user_id)):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    plan = build_quality_distribute_plan(project.quality_assets)
+    return {
+        "project_id": project_id,
+        "clip_source_quality": project.clip_source_quality or settings.clip_source_quality,
+        "clips_expire_at": project.clips_expire_at.isoformat() if project.clips_expire_at else None,
+        **plan,
+    }
+
+
+class DistributeQualitiesBody(BaseModel):
+    qualities: list[str] | None = None
+    only_failed: bool = True
+
+
+@router.post("/{project_id}/distribute/qualities")
+async def distribute_project_qualities_endpoint(
+    project_id: str,
+    body: DistributeQualitiesBody | None = None,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    payload = body or DistributeQualitiesBody()
+    trigger = await trigger_distribute_project_qualities(
+        project_id,
+        qualities=payload.qualities,
+        only_failed=payload.only_failed,
+    )
+    return {
+        "project_id": project_id,
+        "task_id": trigger.get("task_id"),
+        "execution_mode": trigger.get("execution_mode"),
+        "only_failed": payload.only_failed,
+        "message": "Queued full-movie quality uploads to hosts",
     }
 
 

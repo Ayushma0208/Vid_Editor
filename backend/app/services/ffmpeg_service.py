@@ -1,12 +1,17 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from app.utils.ffmpeg_utils import get_ffmpeg_path, get_ffprobe_path
+
+_MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", re.IGNORECASE)
+_MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", re.IGNORECASE)
+_SCENE_SCORE_RE = re.compile(r"lavfi\.scene_score\s*=\s*([\d.]+)", re.IGNORECASE)
 
 _drawtext_available: bool | None = None
 
@@ -239,6 +244,78 @@ class FfmpegService:
         except ValueError:
             return None
 
+    async def probe_volume_stats(self, input_path: str) -> dict[str, float] | None:
+        """Return mean_volume / max_volume in dB via volumedetect, or None on failure."""
+        ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_bin,
+            "-hide_banner",
+            "-i",
+            input_path,
+            "-vn",
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        text = stderr.decode(errors="replace") if stderr else ""
+        mean_match = _MEAN_VOLUME_RE.search(text)
+        max_match = _MAX_VOLUME_RE.search(text)
+        if not mean_match and not max_match:
+            return None
+        result: dict[str, float] = {}
+        if mean_match:
+            result["mean_volume"] = float(mean_match.group(1))
+        if max_match:
+            result["max_volume"] = float(max_match.group(1))
+        return result or None
+
+    async def probe_scene_change_count(self, input_path: str, threshold: float = 0.3) -> int | None:
+        """Count frames where scene score exceeds threshold. Returns None on failure."""
+        safe_threshold = max(0.01, min(1.0, float(threshold)))
+        ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg_bin,
+            "-hide_banner",
+            "-i",
+            input_path,
+            "-vf",
+            f"select='gt(scene\\,{safe_threshold})',showinfo",
+            "-an",
+            "-f",
+            "null",
+            "-",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        text = stderr.decode(errors="replace") if stderr else ""
+        if not text.strip():
+            return None
+
+        scene_hits = _SCENE_SCORE_RE.findall(text)
+        if scene_hits:
+            return len(scene_hits)
+
+        showinfo_lines = [
+            line for line in text.splitlines() if "Parsed_showinfo" in line or "showinfo" in line.lower()
+        ]
+        if showinfo_lines:
+            return len(showinfo_lines)
+
+        n_lines = [line for line in text.splitlines() if re.search(r"\bn:\s*\d+", line)]
+        if n_lines:
+            return len(n_lines)
+
+        # Successful run with zero scene changes is a valid 0.
+        if process.returncode == 0:
+            return 0
+        return None
+
     async def probe_dimensions(self, input_path: str) -> tuple[int, int] | None:
         try:
             stdout = await self._run_ffprobe(
@@ -288,6 +365,28 @@ class FfmpegService:
             vf,
             "-c:v",
             "libx264",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            output_path,
+        )
+        return output_path
+
+    async def scale_to_height(self, input_path: str, output_path: str, height: int) -> str:
+        """Downscale (or copy-scale) preserving aspect ratio; width is even for H.264."""
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        target = max(2, int(height))
+        await self._run_ffmpeg(
+            "-y",
+            "-i",
+            input_path,
+            "-vf",
+            f"scale=-2:{target}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
             "-c:a",
             "aac",
             "-movflags",

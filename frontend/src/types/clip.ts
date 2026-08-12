@@ -5,7 +5,9 @@ export interface Clip {
   start_time: number
   end_time: number
   duration: number
-  viral_score: number
+  interest_score?: number | null
+  is_recommended?: boolean
+  viral_score?: number
   file_url: string
   thumbnail_url: string
   captions: Caption[]

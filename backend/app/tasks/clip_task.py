@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import math
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +15,15 @@ from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
 from app.services.ffmpeg_service import FfmpegService
+from app.services.interest_score_service import InterestScoreService, mark_recommended_clips
+from app.services.quality_host_routing import (
+    TARGET_QUALITY_KEYS,
+    quality_key,
+)
 from app.utils.celery_utils import celery_workers_available
 from app.utils.ffmpeg_utils import get_ffmpeg_path
+
+logger = logging.getLogger(__name__)
 
 
 _cache_lock = None
@@ -37,7 +46,86 @@ def get_cache_lock():
     return _cache_lock
 
 
+def _higher_ready_source(project: Project, clip_key: str) -> tuple[str, str] | None:
+    """Return (quality_key, local_path) for the best ready asset taller than clip_key."""
+    clip_h = int(clip_key) if clip_key.isdigit() else 720
+    assets = project.quality_assets or {}
+    candidates: list[tuple[int, str, str]] = []
+    for key in TARGET_QUALITY_KEYS:
+        if not key.isdigit() or int(key) <= clip_h:
+            continue
+        asset = assets.get(key) or {}
+        path = asset.get("local_path")
+        if asset.get("status") == "ready" and path and Path(str(path)).is_file():
+            candidates.append((int(key), key, str(path)))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    _, key, path = candidates[0]
+    return key, path
+
+
+def _resolve_clip_source_path(project: Project) -> str | None:
+    """Prefer configured clip quality; otherwise any higher ready ladder file or local path."""
+    clip_key = quality_key(project.clip_source_quality or settings.clip_source_quality or "720")
+    assets = project.quality_assets or {}
+    asset = assets.get(clip_key) or {}
+    path = asset.get("local_path")
+    if asset.get("status") == "ready" and path and Path(str(path)).is_file():
+        return str(path)
+
+    higher = _higher_ready_source(project, clip_key)
+    if higher:
+        return higher[1]
+
+    # Same-or-lower ready assets still usable for cutting when nothing else exists.
+    fallbacks: list[tuple[int, str]] = []
+    for key in TARGET_QUALITY_KEYS:
+        if not key.isdigit():
+            continue
+        item = assets.get(key) or {}
+        item_path = item.get("local_path")
+        if item.get("status") == "ready" and item_path and Path(str(item_path)).is_file():
+            fallbacks.append((int(key), str(item_path)))
+    if fallbacks:
+        fallbacks.sort(reverse=True)
+        return fallbacks[0][1]
+
+    if project.local_video_path and Path(project.local_video_path).is_file():
+        return project.local_video_path
+    return None
+
+
+async def ensure_clip_source_quality(project: Project) -> str | None:
+    """
+    Resolve a local file suitable for cutting clips.
+
+    Prefer the configured clip-source quality when present. If only a higher
+    ready quality exists (common for single-file uploads), use that directly —
+    do not re-encode the entire film first (that blocked generation for long uploads).
+    """
+    existing = _resolve_clip_source_path(project)
+    if not existing:
+        return None
+
+    meta = dict(project.metadata or {})
+    if meta.pop("auto_clip_warning", None) is not None:
+        project.metadata = meta
+        project.local_video_path = existing
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+    elif not project.local_video_path:
+        project.local_video_path = existing
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+    return existing
+
+
 async def _acquire_raw_video(project: Project, project_id: str) -> str:
+    clip_source = _resolve_clip_source_path(project)
+    if clip_source:
+        return str(Path(clip_source).resolve())
+
     if project.local_video_path:
         local_path = Path(project.local_video_path)
         if local_path.is_file():
@@ -137,7 +225,13 @@ async def enqueue_clip_processing(project_id: str, clip_id: str) -> str:
         except Exception:
             pass
 
-    asyncio.create_task(run_clip_processing(project_id, clip_id))
+    async def _local() -> None:
+        await run_clip_processing(project_id, clip_id)
+        clip = await Clip.get(PydanticObjectId(clip_id))
+        if clip:
+            await mark_recommended_clips(project_id, clip.user_id)
+
+    asyncio.create_task(_local())
     return "local-background"
 
 
@@ -153,9 +247,26 @@ async def trigger_auto_generate_clips(project_id: str, clip_duration: int | None
                 "segment_seconds": segment_seconds,
             }
         except Exception:
-            pass
+            logger.exception("Failed to enqueue Celery clip generation for %s", project_id)
 
-    asyncio.create_task(auto_generate_project_clips(project_id, segment_seconds))
+    async def _local() -> None:
+        try:
+            result = await auto_generate_project_clips(project_id, segment_seconds)
+            logger.info("Local clip generation finished for %s: %s", project_id, result)
+        except Exception:
+            logger.exception("Local clip generation failed for project %s", project_id)
+            try:
+                project = await Project.get(PydanticObjectId(project_id))
+                if project:
+                    meta = dict(project.metadata or {})
+                    meta["auto_clip_warning"] = "Clip generation failed unexpectedly. Check server logs."
+                    project.metadata = meta
+                    project.updated_at = datetime.now(timezone.utc)
+                    await project.save()
+            except Exception:
+                logger.exception("Could not persist clip generation failure for %s", project_id)
+
+    asyncio.create_task(_local())
     return {"task_id": None, "execution_mode": "local-background", "segment_seconds": segment_seconds}
 
 
@@ -223,6 +334,14 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
         clip.file_size_bytes = Path(saved_clip_path).stat().st_size
         clip.status = ClipStatus.READY
 
+        # Score the content cut (without optional ad) so ads don't inflate interest.
+        try:
+            await InterestScoreService(ffmpeg_service).apply_scores_to_clip(clip, clip_output_path)
+        except Exception:
+            clip.interest_score = None
+            clip.interest_audio = None
+            clip.interest_motion = None
+
         try:
             clip_upload = await cloudinary_service.upload_video(
                 file_path=upload_path,
@@ -263,13 +382,50 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
     if not project:
         raise RuntimeError("Project not found")
 
-    if not project.local_video_path:
-        raise RuntimeError("Project is missing a local video file")
+    clip_key = quality_key(project.clip_source_quality or settings.clip_source_quality or "720")
+    try:
+        clip_source = await ensure_clip_source_quality(project)
+    except Exception as exc:
+        meta = dict(project.metadata or {})
+        meta["auto_clip_warning"] = f"Failed to prepare {clip_key}p clip source: {exc}"
+        project.metadata = meta
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+        return {
+            "project_id": project_id,
+            "created_clips": 0,
+            "queued_clips": 0,
+            "segment_seconds": clip_duration or settings.default_clip_duration_seconds,
+            "recommended_clips": 0,
+            "status": "skipped",
+            "warning": meta["auto_clip_warning"],
+        }
+    if not clip_source:
+        project = await Project.get(PydanticObjectId(project_id)) or project
+        clip_source = _resolve_clip_source_path(project)
+    if not clip_source:
+        meta = dict(project.metadata or {})
+        meta["auto_clip_warning"] = (
+            f"{clip_key}p source is required for clip generation but was not found. Skipping clips."
+        )
+        project.metadata = meta
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+        return {
+            "project_id": project_id,
+            "created_clips": 0,
+            "queued_clips": 0,
+            "segment_seconds": clip_duration or settings.default_clip_duration_seconds,
+            "recommended_clips": 0,
+            "status": "skipped",
+            "warning": meta["auto_clip_warning"],
+        }
 
-    source_path = Path(project.local_video_path)
-    if not source_path.is_file():
-        raise RuntimeError("Downloaded video file is missing")
+    # Ensure downstream processing uses the clip-source path.
+    project.local_video_path = clip_source
+    await project.save()
 
+    source_path = Path(clip_source)
     segment_length = max(int(clip_duration or settings.default_clip_duration_seconds), 1)
     ffmpeg_service = FfmpegService()
     duration_seconds = project.duration_seconds or await ffmpeg_service.probe_duration(str(source_path))
@@ -284,7 +440,7 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
     queued_count = 0
     part_number = 1
     segment_starts = range(0, int(math.ceil(duration_seconds)), segment_length)
-    use_celery = await celery_workers_available()
+    created_ids: list[str] = []
 
     for start_time in segment_starts:
         end_time = min(float(start_time + segment_length), float(duration_seconds))
@@ -310,19 +466,28 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
         )
         await clip.insert()
         created_count += 1
-        clip_id = str(clip.id)
-        # Process inline. Nesting create_clip_task.delay() from inside a Celery
-        # worker (or asyncio.create_task on the worker loop) leaves clips stuck
-        # in pending without files.
+        created_ids.append(str(clip.id))
+        part_number += 1
+
+    # Process after all rows exist so the UI can show pending clips immediately.
+    for clip_id in created_ids:
         await run_clip_processing(project_id, clip_id)
         queued_count += 1
-        part_number += 1
+
+    rank = await mark_recommended_clips(project_id, project.user_id)
+
+    ttl_days = max(1, int(settings.clip_ttl_days or 7))
+    project.clips_expire_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
 
     return {
         "project_id": project_id,
         "created_clips": created_count,
         "queued_clips": queued_count,
         "segment_seconds": segment_length,
+        "recommended_clips": rank.get("recommended", 0),
+        "clips_expire_at": project.clips_expire_at.isoformat() if project.clips_expire_at else None,
         "status": "processing",
     }
 
@@ -330,7 +495,15 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
 @celery_app.task(name="create_clip_task")
 def create_clip_task(project_id: str, clip_id: str):
     loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
-    return loop.run_until_complete(run_clip_processing(project_id, clip_id))
+
+    async def _run() -> dict:
+        result = await run_clip_processing(project_id, clip_id)
+        clip = await Clip.get(PydanticObjectId(clip_id))
+        if clip:
+            await mark_recommended_clips(project_id, clip.user_id)
+        return result
+
+    return loop.run_until_complete(_run())
 
 
 @celery_app.task(name="auto_generate_clips_task")

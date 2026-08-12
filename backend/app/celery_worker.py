@@ -23,7 +23,15 @@ celery_app.conf.update(
         "app.tasks.publish_task",
         "app.tasks.host_upload_task",
         "app.tasks.summary_task",
+        "app.tasks.quality_distribute_task",
+        "app.tasks.clip_cleanup_task",
     ),
+    beat_schedule={
+        "cleanup-expired-clips-hourly": {
+            "task": "cleanup_expired_clips_task",
+            "schedule": 3600.0,
+        },
+    },
 )
 
 worker_loop = None

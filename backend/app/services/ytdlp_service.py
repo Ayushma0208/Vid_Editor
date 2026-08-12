@@ -79,6 +79,91 @@ class YTDLPService:
         except (IndexError, json.JSONDecodeError) as exc:
             raise RuntimeError("Failed to parse yt-dlp metadata JSON") from exc
 
+    async def list_available_heights(self, url: str) -> set[int]:
+        """Return distinct video heights available for the URL (from format metadata)."""
+        metadata = await self.get_metadata(url)
+        heights: set[int] = set()
+        for fmt in metadata.get("formats") or []:
+            height = fmt.get("height")
+            if isinstance(height, int) and height > 0:
+                heights.add(height)
+            elif isinstance(height, float) and height > 0:
+                heights.add(int(height))
+        # Some extractors only expose requested/best height on the top-level entry.
+        top_height = metadata.get("height")
+        if isinstance(top_height, int) and top_height > 0:
+            heights.add(top_height)
+        return heights
+
+    def _height_available(self, available: set[int], target_height: int) -> bool:
+        """True if an exact height exists, or a format within a small tolerance band."""
+        if target_height in available:
+            return True
+        # Allow near-matches (e.g. 242≈240, 478≈480) but do not nearest-up to another bucket.
+        tolerance = 15
+        return any(abs(h - target_height) <= tolerance for h in available)
+
+    async def download_video_quality(self, url: str, output_path: str, height: int) -> str:
+        """Download a specific target height. Raises if download fails."""
+        output_target = Path(output_path)
+        output_target.parent.mkdir(parents=True, exist_ok=True)
+        # Prefer exact height; fall back to height<=target within the same ladder step only
+        # when exact is unavailable at download time (list check already skipped missing).
+        fmt = (
+            f"bestvideo[height={height}]+bestaudio/"
+            f"best[height={height}]/"
+            f"bestvideo[height<={height}][height>={max(1, height - 15)}]+bestaudio/"
+            f"best[height<={height}][height>={max(1, height - 15)}]"
+        )
+        client_attempts = [
+            "youtube:player_client=android,web",
+            "youtube:player_client=ios,android",
+            "youtube:player_client=tv_embedded,android",
+        ]
+        cmd_common = [
+            "--no-playlist",
+            "--retries",
+            "5",
+            "--fragment-retries",
+            "5",
+            "--socket-timeout",
+            "20",
+            "--force-ipv4",
+            "--merge-output-format",
+            "mp4",
+            "--print",
+            "after_move:filepath",
+            "-o",
+            str(output_target),
+        ]
+        cookie_args = self._cookie_args()
+        stdout = b""
+        stderr = b""
+        best_stderr = ""
+        return_code = 1
+        for client_args in client_attempts:
+            return_code, stdout, stderr = await self._run_yt_dlp(
+                cookie_args + cmd_common + ["--extractor-args", client_args, "-f", fmt, url]
+            )
+            if return_code == 0:
+                break
+            err_text = stderr.decode().strip()
+            if err_text:
+                best_stderr = err_text
+        if return_code != 0:
+            raise RuntimeError(self._friendly_error(best_stderr or stderr.decode().strip()))
+
+        printed = [line.strip() for line in stdout.decode().splitlines() if line.strip()]
+        if printed:
+            return printed[-1]
+        if output_target.exists():
+            return str(output_target)
+        # yt-dlp may write with a real extension replacing %(ext)s
+        matches = list(output_target.parent.glob(output_target.stem + ".*"))
+        if matches:
+            return str(matches[0])
+        raise RuntimeError(f"yt-dlp completed but {height}p output was not detected")
+
     async def download_video(self, url: str, output_path: str, quality: str = "1080p") -> str:
         height = "".join(ch for ch in quality if ch.isdigit()) or "1080"
         output_target = Path(output_path)

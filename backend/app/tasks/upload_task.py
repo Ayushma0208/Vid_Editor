@@ -11,9 +11,16 @@ from fastapi import BackgroundTasks
 from app.config import settings
 from app.models.project import Project, ProjectStatus
 from app.services.ffmpeg_service import FfmpegService
+from app.services.quality_host_routing import (
+    empty_quality_asset,
+    host_for_quality,
+    init_quality_assets,
+    nearest_target_quality,
+    quality_key,
+)
 from app.tasks.clip_task import start_local_clip_generation
 from app.tasks.download_task import _set_project_error
-from app.tasks.summary_task import trigger_project_summary
+from app.tasks.quality_distribute_task import trigger_distribute_project_qualities
 from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, format_exception, get_ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -88,40 +95,93 @@ async def _run_upload_pipeline(project_id: str, source_path: Path) -> dict:
     thumb_path = project_dir / "thumbnail.jpg"
     thumb_ok = await _generate_thumbnail(dest_path, thumb_path)
 
+    dims = await ffmpeg_service.probe_dimensions(str(dest_path))
+    probed_height = dims[1] if dims else None
+    bucket = nearest_target_quality(probed_height)
+    clip_key = quality_key(settings.clip_source_quality or "720")
+
+    qualities_dir = project_dir / "qualities"
+    qualities_dir.mkdir(parents=True, exist_ok=True)
+    quality_path = qualities_dir / f"{bucket}.mp4"
+    if Path(dest_path).resolve() != quality_path.resolve():
+        shutil.copy2(dest_path, quality_path)
+
+    assets = init_quality_assets()
+    for key, asset in assets.items():
+        if key == bucket:
+            assets[key] = {
+                **empty_quality_asset(key),
+                "status": "ready",
+                "local_path": str(quality_path),
+                "file_size_bytes": quality_path.stat().st_size,
+                "height": probed_height or int(key),
+                "host": host_for_quality(key),
+                "host_status": "pending",
+            }
+        else:
+            assets[key] = {
+                **empty_quality_asset(key, status="missing"),
+                "host_status": "skipped",
+                "host_error": "Not provided in single-file upload",
+            }
+
     metadata = project.metadata or {}
     metadata.pop("error_message", None)
+    metadata.pop("auto_clip_warning", None)
     metadata["source"] = "upload"
+    metadata["upload_quality_bucket"] = bucket
     if thumb_ok:
         metadata["local_thumbnail_path"] = str(thumb_path)
 
-    project.local_video_path = str(dest_path)
+    clip_height = int(clip_key) if clip_key.isdigit() else 720
+    bucket_height = int(bucket) if bucket.isdigit() else 0
+    # Use the uploaded file for clipping when it meets or exceeds the clip ladder height.
+    # Avoid re-encoding the entire film to 720p up front (slow/fragile for long uploads).
+    has_clip_source = quality_path.is_file() and bucket_height >= clip_height
+    if has_clip_source:
+        project.local_video_path = str(quality_path)
+    elif quality_path.is_file() and bucket_height > 0:
+        # Lower-than-preferred upload: still allow cutting from what we have.
+        project.local_video_path = str(quality_path)
+        has_clip_source = True
+    else:
+        project.local_video_path = str(dest_path)
+        metadata["auto_clip_warning"] = (
+            f"Uploaded file mapped to {bucket}p. "
+            f"Clip generation requires a local video file — skipped for this upload."
+        )
+
     project.duration_seconds = duration
+    project.quality_assets = assets
+    project.clip_source_quality = clip_key
     project.status = ProjectStatus.READY
     project.metadata = metadata
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
 
     try:
-        await trigger_project_summary(project_id)
+        await trigger_distribute_project_qualities(project_id)
     except Exception:
-        logger.exception("Summary trigger failed for project %s", project_id)
+        logger.exception("Quality host distribute trigger failed for project %s", project_id)
 
-    try:
-        await start_local_clip_generation(project_id, settings.default_clip_duration_seconds)
-    except Exception as exc:
-        logger.exception("Clip generation failed for project %s", project_id)
-        fresh = await Project.get(PydanticObjectId(project_id))
-        if fresh:
-            clip_meta = fresh.metadata or {}
-            clip_meta["auto_clip_warning"] = format_exception(exc)
-            fresh.metadata = clip_meta
-            await fresh.save()
+    if has_clip_source:
+        try:
+            await start_local_clip_generation(project_id, settings.default_clip_duration_seconds)
+        except Exception as exc:
+            logger.exception("Clip generation failed for project %s", project_id)
+            fresh = await Project.get(PydanticObjectId(project_id))
+            if fresh:
+                clip_meta = fresh.metadata or {}
+                clip_meta["auto_clip_warning"] = format_exception(exc)
+                fresh.metadata = clip_meta
+                await fresh.save()
 
     return {
         "project_id": project_id,
         "status": project.status.value,
         "local_video_path": project.local_video_path,
         "duration_seconds": project.duration_seconds,
+        "quality_assets": project.quality_assets,
     }
 
 

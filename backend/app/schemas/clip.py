@@ -17,7 +17,9 @@ class ClipResponse(BaseModel):
     start_time: float
     end_time: float
     duration: float
-    viral_score: float
+    interest_score: Optional[float] = None
+    is_recommended: bool = False
+    viral_score: Optional[float] = None  # legacy alias; prefer interest_score
     file_url: Optional[str]
     thumbnail_url: Optional[str]
     platform_format: str

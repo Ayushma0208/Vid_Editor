@@ -31,6 +31,8 @@ router = APIRouter(tags=["publishing"])
 class PublishBody(BaseModel):
     title: str = ""
     description: str = ""
+    clip_ids: list[str] | None = None
+    recommended_only: bool = True
 
 
 class DistributeBody(BaseModel):
@@ -164,9 +166,10 @@ async def publish_clip_to_instagram(
     title = payload.title.strip()
     description = payload.description.strip()
     if not description:
-        project = await Project.get(clip.project_id)
-        if project and project.summary:
-            description = project.summary
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Caption is required. Fetch one from the copy pool or write your own.",
+        )
     if not title:
         title = (clip.label or "").strip()
 
@@ -210,7 +213,7 @@ async def publish_all_project_clips_to_instagram(
         Clip.project_id == project_id,
         Clip.user_id == user_id,
         Clip.status == ClipStatus.READY,
-    ).to_list()
+    ).sort("+start_time").to_list()
     publishable = [c for c in ready_clips if c.cloudinary_clip_url]
     if not publishable:
         raise HTTPException(
@@ -220,10 +223,50 @@ async def publish_all_project_clips_to_instagram(
 
     payload = body or PublishBody()
     title = payload.title.strip() or (project.title or "")
-    description = payload.description.strip() or (project.summary or "")
+    description = payload.description.strip()
+    if not description:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Caption is required. Fetch one from the copy pool or write your own.",
+        )
 
-    task = publish_all_instagram_task.delay(project_id, user_id, title, description)
-    for clip in publishable:
+    selected = publishable
+    selection_mode = "all"
+    if payload.clip_ids:
+        wanted = {cid.strip() for cid in payload.clip_ids if cid and cid.strip()}
+        by_id = {str(c.id): c for c in publishable}
+        missing = sorted(wanted - set(by_id.keys()))
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown or unpublishable clip_ids: {', '.join(missing[:8])}",
+            )
+        selected = [by_id[cid] for cid in wanted if cid in by_id]
+        # Preserve chronological order
+        selected.sort(key=lambda c: float(c.start_time or 0.0))
+        selection_mode = "selected"
+    elif payload.recommended_only:
+        recommended = [c for c in publishable if c.is_recommended]
+        if not recommended:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "No recommended clips available. "
+                    "Regenerate clips to compute interest scores, or publish with recommended_only=false."
+                ),
+            )
+        selected = recommended
+        selection_mode = "recommended"
+
+    if not selected:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No clips matched the publish selection",
+        )
+
+    clip_ids = [str(c.id) for c in selected]
+    task = publish_all_instagram_task.delay(project_id, user_id, title, description, clip_ids)
+    for clip in selected:
         clip.publish_task_id = task.id
         clip.publish_platform = "instagram"
         clip.publish_status = "queued"
@@ -232,12 +275,14 @@ async def publish_all_project_clips_to_instagram(
     return {
         "task_id": task.id,
         "status": "queued",
-        "clip_count": len(publishable),
+        "clip_count": len(selected),
+        "clip_ids": clip_ids,
+        "selection_mode": selection_mode,
         "delay_seconds": settings.instagram_publish_delay_seconds,
-        "using_full_video_summary": bool(description),
+        "using_copy_pool_caption": bool(description),
         "message": (
-            f"Queued {len(publishable)} clips for Instagram. "
-            "Each Reel caption uses the full-video summary."
+            f"Queued {len(selected)} clips for Instagram ({selection_mode}). "
+            "Each Reel uses the same caption text."
         ),
     }
 
@@ -290,6 +335,8 @@ async def get_project_instagram_publish_status(
             "publish_status": clip.publish_status,
             "published_url": clip.published_url,
             "has_cloudinary_url": bool(clip.cloudinary_clip_url),
+            "interest_score": clip.interest_score,
+            "is_recommended": bool(clip.is_recommended),
         }
         for clip in clips
     ]
@@ -335,7 +382,12 @@ async def retry_failed_instagram_publishes(
 
     payload = body or PublishBody()
     title = payload.title.strip() or (project.title or "")
-    description = payload.description.strip() or (project.summary or "")
+    description = payload.description.strip()
+    if not description:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Caption is required. Fetch one from the copy pool or write your own.",
+        )
 
     # Re-queue only failed clips via the same sequential publish-all worker path
     # by temporarily marking others as already published/idle isn't needed —

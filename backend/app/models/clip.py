@@ -33,6 +33,10 @@ class Clip(Document):
     local_clip_path: str | None = None
     local_thumbnail_path: str | None = None
     file_size_bytes: int | None = None
+    interest_score: float | None = None
+    interest_audio: float | None = None
+    interest_motion: float | None = None
+    is_recommended: bool = False
     publish_task_id: str | None = None
     publish_platform: str | None = None
     publish_status: str | None = None

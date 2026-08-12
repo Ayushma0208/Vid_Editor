@@ -121,5 +121,5 @@ async def create_project_from_upload(
     response = serialize_document(project)
     response["execution_mode"] = "local-background"
     response["segment_seconds"] = settings.default_clip_duration_seconds
-    response["message"] = "Video uploaded. Cutting into 60-second clips and generating summary…"
+    response["message"] = "Video uploaded. Cutting into 60-second clips…"
     return response

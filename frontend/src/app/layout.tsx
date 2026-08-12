@@ -8,7 +8,7 @@ const inter = Inter({ subsets: ["latin"] })
  
 export const metadata: Metadata = {
   title: "Movie Clips — Split long videos into 60-second clips",
-  description: "Upload long videos, cut them into 60-second clips, and publish to Instagram with a full-video summary",
+  description: "Upload long videos, cut them into 60-second clips, and publish to Instagram",
 }
  
 export default function RootLayout({ children }: { children: React.ReactNode }) {

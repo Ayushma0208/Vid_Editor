@@ -5,6 +5,7 @@ from app.api.v1.uploads import router as uploads_router
 from app.api.v1.assets import router as assets_router
 from app.api.v1.captions import router as captions_router
 from app.api.v1.clips import router as clips_router
+from app.api.v1.copy_pool import router as copy_pool_router
 from app.api.v1.projects import router as projects_router
 from app.api.v1.publishing import router as publishing_router
 from app.api.v1.videos import router as videos_router
@@ -19,3 +20,4 @@ api_router.include_router(clips_router)
 api_router.include_router(captions_router)
 api_router.include_router(assets_router)
 api_router.include_router(publishing_router)
+api_router.include_router(copy_pool_router)
