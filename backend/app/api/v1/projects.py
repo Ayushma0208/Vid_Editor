@@ -338,8 +338,11 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
     data["source_file_available"] = bool(usable or (local_path and local_path.is_file()))
     data["is_upload"] = is_upload_project(project)
     data["has_cloudinary_raw"] = bool(project.cloudinary_raw_url)
+    # Only after processing finished — during downloading/pending the file isn't ready yet.
+    finished = project.status in (ProjectStatus.READY, ProjectStatus.ERROR)
     data["needs_reupload"] = bool(
-        is_upload_project(project)
+        finished
+        and is_upload_project(project)
         and not data["source_file_available"]
         and not project.cloudinary_raw_url
     )

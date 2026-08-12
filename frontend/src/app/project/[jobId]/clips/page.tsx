@@ -547,11 +547,17 @@ export default function ProjectClipsPage() {
       : null)
   const canGenerate = projectStatus === "ready" && !isProcessingUpload
   const sourceMissing = project.source_file_available === false
-  const needsRefetch = !isUpload && sourceMissing && readyCount > 0 && !!project.yt_url
+  const needsRefetch = !isUpload && !isProcessingUpload && sourceMissing && readyCount > 0 && !!project.yt_url
   const needsReupload =
     isUpload &&
-    (project.needs_reupload === true || (sourceMissing && !project.has_cloudinary_raw && !project.cloudinary_raw_url))
-  const canRestoreUpload = isUpload && sourceMissing && !!(project.has_cloudinary_raw || project.cloudinary_raw_url)
+    !isProcessingUpload &&
+    (project.needs_reupload === true ||
+      (sourceMissing && !project.has_cloudinary_raw && !project.cloudinary_raw_url))
+  const canRestoreUpload =
+    isUpload &&
+    !isProcessingUpload &&
+    sourceMissing &&
+    !!(project.has_cloudinary_raw || project.cloudinary_raw_url)
 
   return (
     <div
