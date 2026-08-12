@@ -331,7 +331,18 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
     data = serialize_document(project)
     data["download_status"] = project.status
     local_path = Path(project.local_video_path) if project.local_video_path else None
-    data["source_file_available"] = bool(local_path and local_path.is_file())
+    from app.tasks.clip_task import _resolve_clip_source_path
+    from app.tasks.upload_task import is_upload_project
+
+    usable = _resolve_clip_source_path(project)
+    data["source_file_available"] = bool(usable or (local_path and local_path.is_file()))
+    data["is_upload"] = is_upload_project(project)
+    data["has_cloudinary_raw"] = bool(project.cloudinary_raw_url)
+    data["needs_reupload"] = bool(
+        is_upload_project(project)
+        and not data["source_file_available"]
+        and not project.cloudinary_raw_url
+    )
     return data
 
 
@@ -398,10 +409,81 @@ async def retry_download(project_id: str, user_id: str = Depends(get_current_use
 
 @router.post("/{project_id}/refetch-source")
 async def refetch_source(project_id: str, user_id: str = Depends(get_current_user_id)):
-    """Re-download the source video and re-process clips when local temp files were lost."""
+    """Re-download / restore source and re-process clips when local temp files were lost."""
     project = await Project.get(project_id)
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    from app.tasks.clip_task import _resolve_clip_source_path, run_clip_processing
+    from app.tasks.upload_task import is_upload_project, restore_upload_source_from_cloudinary
+
+    # Manual uploads must never go through yt-dlp (yt_url is upload://...).
+    if is_upload_project(project):
+        usable_source = _resolve_clip_source_path(project)
+        if usable_source:
+            clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
+            missing_clips = [
+                c
+                for c in clips
+                if not (c.local_clip_path and Path(c.local_clip_path).is_file())
+                and not c.cloudinary_clip_url
+            ]
+            if not missing_clips:
+                return {
+                    "project_id": project_id,
+                    "message": "Source video and clip files are already available.",
+                    "source_file_available": True,
+                }
+            for clip in missing_clips:
+                await run_clip_processing(project_id, str(clip.id))
+            return {
+                "project_id": project_id,
+                "message": f"Re-processed {len(missing_clips)} clip(s) from the existing source video.",
+                "reprocessed_clips": len(missing_clips),
+                "execution_mode": "inline",
+            }
+
+        if project.cloudinary_raw_url:
+            if project.status == ProjectStatus.DOWNLOADING:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Source video is already being restored. Please wait.",
+                )
+
+            async def _restore_upload_bg() -> None:
+                try:
+                    await restore_upload_source_from_cloudinary(project)
+                except Exception as exc:
+                    fresh = await Project.get(project_id)
+                    if fresh:
+                        meta = dict(fresh.metadata or {})
+                        meta["error_message"] = str(exc)
+                        fresh.metadata = meta
+                        fresh.status = ProjectStatus.ERROR
+                        await fresh.save()
+
+            asyncio.create_task(_restore_upload_bg())
+            return {
+                "project_id": project_id,
+                "message": "Restoring uploaded video from Cloudinary and rebuilding clips…",
+                "execution_mode": "local-background",
+            }
+
+        meta = dict(project.metadata or {})
+        if meta.get("error_message") and "upload" in str(meta.get("error_message")).lower():
+            meta.pop("error_message", None)
+            project.metadata = meta
+            if project.status == ProjectStatus.ERROR:
+                project.status = ProjectStatus.READY
+            await project.save()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This is a manual upload — the original file is gone from the server "
+                "and there is no Cloudinary backup. Please upload the video again."
+            ),
+        )
 
     if not project.yt_url:
         raise HTTPException(
@@ -409,9 +491,6 @@ async def refetch_source(project_id: str, user_id: str = Depends(get_current_use
             detail="This project has no YouTube URL to re-download from.",
         )
 
-    from app.tasks.clip_task import _resolve_clip_source_path, run_clip_processing
-
-    # Ignore Windows/local paths that aren't usable on this host (common after Mac→Render).
     usable_source = _resolve_clip_source_path(project)
     if usable_source:
         clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
@@ -470,11 +549,18 @@ async def generate_clips(
 
     clip_key = quality_key(project.clip_source_quality or settings.clip_source_quality or "720")
     clip_source = _resolve_clip_source_path(project)
-    if not clip_source:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"No local video available for clip generation (need {clip_key}p or another ready quality)",
+    if not clip_source and not project.cloudinary_raw_url:
+        from app.tasks.upload_task import is_upload_project
+
+        detail = (
+            "No local video available for clip generation. "
+            + (
+                "Please upload the video again."
+                if is_upload_project(project)
+                else f"Need {clip_key}p (or another ready quality), or use Refetch source."
+            )
         )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
     if not segment_seconds or segment_seconds < 1:
         segment_seconds = settings.default_clip_duration_seconds

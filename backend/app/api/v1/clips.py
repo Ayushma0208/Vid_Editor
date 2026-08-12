@@ -187,17 +187,42 @@ async def stream_project_clip(project_id: str, clip_id: str, request: Request, t
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url=clip.cloudinary_clip_url)
 
-    if not clip.local_clip_path:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not available")
+    if clip.local_clip_path:
+        clip_path = Path(clip.local_clip_path)
+        if clip_path.is_file():
+            return FileResponse(
+                path=str(clip_path),
+                media_type="video/mp4",
+                filename=f"{clip.label or clip_id}.mp4",
+            )
 
-    clip_path = Path(clip.local_clip_path)
-    if not clip_path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip file not found on disk")
+    # Temp disk wiped — try rebuilding from Cloudinary raw / remaining local source.
+    if clip.status == ClipStatus.READY:
+        project = await Project.get(project_id)
+        if project and (project.cloudinary_raw_url or project.local_video_path):
+            try:
+                from app.tasks.clip_task import run_clip_processing
 
-    return FileResponse(
-        path=str(clip_path),
-        media_type="video/mp4",
-        filename=f"{clip.label or clip_id}.mp4",
+                await run_clip_processing(project_id, clip_id)
+                refreshed = await Clip.get(clip_id)
+                if refreshed and refreshed.cloudinary_clip_url:
+                    from fastapi.responses import RedirectResponse
+                    return RedirectResponse(url=refreshed.cloudinary_clip_url)
+                if refreshed and refreshed.local_clip_path and Path(refreshed.local_clip_path).is_file():
+                    return FileResponse(
+                        path=str(refreshed.local_clip_path),
+                        media_type="video/mp4",
+                        filename=f"{clip.label or clip_id}.mp4",
+                    )
+            except Exception:
+                pass
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=(
+            "Clip file not available on the server. "
+            "For YouTube projects use Refetch source; for manual uploads re-upload the video."
+        ),
     )
 
 

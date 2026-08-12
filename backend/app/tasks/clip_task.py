@@ -374,8 +374,12 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
             clip.cloudinary_public_id = clip_upload.get("public_id")
             clip.thumbnail_url = thumb_upload.get("secure_url") or thumb_upload.get("url")
         except Exception:
-            # Keep local files — Cloudinary is optional for local development.
-            pass
+            # Keep local files — Cloudinary is required for durable playback on ephemeral hosts.
+            logger.exception(
+                "Cloudinary clip upload failed project=%s clip=%s — playback may break after temp wipe",
+                project_id,
+                clip_id,
+            )
 
         await clip.save()
     except Exception as exc:

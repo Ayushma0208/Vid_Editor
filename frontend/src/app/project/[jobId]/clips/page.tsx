@@ -16,6 +16,9 @@ type ProjectData = {
   duration_seconds?: number | null
   yt_url?: string
   source_file_available?: boolean
+  is_upload?: boolean
+  has_cloudinary_raw?: boolean
+  needs_reupload?: boolean
   created_at?: string
   summary?: string | null
   summary_status?: string | null
@@ -150,6 +153,7 @@ function ClipModal({
   const badge = statusBadge(clip.status || "pending")
   const [isDeleting, setIsDeleting] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [playbackError, setPlaybackError] = useState<string | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const isReady = (clip.status || "").toLowerCase() === "ready"
 
@@ -160,6 +164,10 @@ function ClipModal({
       : ""
 
   const posterUrl = clipThumbnailUrl(projectId, clipId, token, clip.thumbnail_url)
+
+  useEffect(() => {
+    setPlaybackError(null)
+  }, [clipId, videoSrc])
 
   const handleDownload = async (e?: MouseEvent) => {
     e?.stopPropagation()
@@ -256,22 +264,33 @@ function ClipModal({
 
         {/* Video player */}
         <div className="bg-slate-100">
-          {clip.status === "ready" && videoSrc ? (
+          {clip.status === "ready" && videoSrc && !playbackError ? (
             <video
               ref={videoRef}
               src={videoSrc}
               controls
               autoPlay
               poster={posterUrl || undefined}
+              onError={() =>
+                setPlaybackError(
+                  "Clip file is missing on the server. For uploads, re-upload the video. For YouTube, use Refetch source.",
+                )
+              }
               className="w-full max-h-[440px] object-contain"
             />
           ) : (
-            <div className="flex aspect-video items-center justify-center">
-              <div className="text-center">
-                <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-[#5b6ef5] border-t-transparent" />
-                <p className="text-sm text-[#4a4d60]">
-                  {clip.status === "processing" ? "Clip is being processed…" : "Clip not ready yet"}
-                </p>
+            <div className="flex aspect-video items-center justify-center px-6">
+              <div className="text-center max-w-md">
+                {playbackError ? (
+                  <p className="text-sm text-red-600">{playbackError}</p>
+                ) : (
+                  <>
+                    <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-[#5b6ef5] border-t-transparent" />
+                    <p className="text-sm text-[#4a4d60]">
+                      {clip.status === "processing" ? "Clip is being processed…" : "Clip not ready yet"}
+                    </p>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -507,20 +526,32 @@ export default function ProjectClipsPage() {
   const readyCount = clips.filter((c) => (c.status || "").toLowerCase() === "ready").length
   const errorCount = clips.filter((c) => (c.status || "").toLowerCase() === "error").length
   const isProcessingUpload = projectStatus === "downloading" || projectStatus === "pending"
-  const isUpload = project.metadata?.source === "upload"
+  const isUpload =
+    project.is_upload === true ||
+    project.metadata?.source === "upload" ||
+    (project.yt_url || "").startsWith("upload://")
   const rawError =
     typeof project.metadata?.error_message === "string" ? project.metadata.error_message.trim() : ""
   const rawWarning =
     typeof project.metadata?.auto_clip_warning === "string" ? project.metadata.auto_clip_warning.trim() : ""
+  // Hide misleading yt-dlp errors on manual uploads (upload:// scheme).
+  const cleanedError =
+    isUpload && /unsupported url scheme.*upload|yt-dlp/i.test(rawError) ? "" : rawError
   const processingError =
-    rawError ||
+    cleanedError ||
     rawWarning ||
     (projectStatus === "error"
-      ? "Video processing failed. Install FFmpeg, restart the backend, then click Retry processing."
+      ? isUpload
+        ? "Upload processing failed. Re-upload the video from the dashboard."
+        : "Video processing failed. Install FFmpeg, restart the backend, then click Retry processing."
       : null)
   const canGenerate = projectStatus === "ready" && !isProcessingUpload
-  const sourceMissing = project.source_file_available === false && !!project.yt_url
-  const needsRefetch = sourceMissing && readyCount > 0
+  const sourceMissing = project.source_file_available === false
+  const needsRefetch = !isUpload && sourceMissing && readyCount > 0 && !!project.yt_url
+  const needsReupload =
+    isUpload &&
+    (project.needs_reupload === true || (sourceMissing && !project.has_cloudinary_raw && !project.cloudinary_raw_url))
+  const canRestoreUpload = isUpload && sourceMissing && !!(project.has_cloudinary_raw || project.cloudinary_raw_url)
 
   return (
     <div
@@ -654,6 +685,40 @@ export default function ProjectClipsPage() {
                 {isRefetchingSource ? "Refetching…" : "Refetch source"}
               </button>
             )}
+          </div>
+        )}
+
+        {canRestoreUpload && (
+          <div className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm text-amber-800">
+              {projectStatus === "downloading" || isRefetchingSource
+                ? "Restoring uploaded video from Cloudinary and rebuilding clips…"
+                : "Clip files are missing on the server. Restore from Cloudinary backup."}
+            </p>
+            {projectStatus !== "downloading" && (
+              <button
+                onClick={handleRefetchSource}
+                disabled={isRefetchingSource}
+                className="flex-shrink-0 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {isRefetchingSource ? "Restoring…" : "Restore from Cloudinary"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {needsReupload && (
+          <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm text-amber-800">
+              This was a manual upload and the original file is gone from the server (Render temp storage).
+              Clips cannot play until you upload the video again from the dashboard.
+            </p>
+            <button
+              onClick={() => router.push("/dashboard")}
+              className="mt-3 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+            >
+              Go to Dashboard to re-upload
+            </button>
           </div>
         )}
 

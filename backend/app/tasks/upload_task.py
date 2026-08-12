@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks
 
 from app.config import settings
 from app.models.project import Project, ProjectStatus
+from app.services.cloudinary_service import CloudinaryService
 from app.services.ffmpeg_service import FfmpegService
 from app.services.quality_host_routing import (
     empty_quality_asset,
@@ -18,12 +19,19 @@ from app.services.quality_host_routing import (
     nearest_target_quality,
     quality_key,
 )
-from app.tasks.clip_task import start_local_clip_generation
+from app.tasks.clip_task import run_clip_processing, start_local_clip_generation
 from app.tasks.download_task import _set_project_error
 from app.tasks.quality_distribute_task import trigger_distribute_project_qualities
 from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, format_exception, get_ffmpeg_path
 
 logger = logging.getLogger(__name__)
+
+
+def is_upload_project(project: Project) -> bool:
+    meta = project.metadata or {}
+    if meta.get("source") == "upload":
+        return True
+    return (project.yt_url or "").strip().lower().startswith("upload:")
 
 
 def staging_upload_path(user_id: str, original_filename: str) -> Path:
@@ -159,6 +167,30 @@ async def _run_upload_pipeline(project_id: str, source_path: Path) -> dict:
     project.updated_at = datetime.now(timezone.utc)
     await project.save()
 
+    # Persist source + thumbnail to Cloudinary so Render temp clears don't kill playback.
+    cloudinary = CloudinaryService()
+    try:
+        raw_upload = await cloudinary.upload_video(
+            str(dest_path if Path(dest_path).is_file() else quality_path),
+            folder=f"projects/{project_id}/raw",
+        )
+        project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
+        project.cloudinary_folder = f"projects/{project_id}/"
+        await project.save()
+    except Exception:
+        logger.exception("Cloudinary raw upload failed for project %s", project_id)
+
+    if thumb_ok and thumb_path.is_file():
+        try:
+            thumb_upload = await cloudinary.upload_image(
+                str(thumb_path),
+                folder=f"projects/{project_id}/thumb",
+            )
+            project.thumbnail_url = thumb_upload.get("secure_url") or thumb_upload.get("url")
+            await project.save()
+        except Exception:
+            logger.exception("Cloudinary thumbnail upload failed for project %s", project_id)
+
     try:
         await trigger_distribute_project_qualities(project_id)
     except Exception:
@@ -182,6 +214,86 @@ async def _run_upload_pipeline(project_id: str, source_path: Path) -> dict:
         "local_video_path": project.local_video_path,
         "duration_seconds": project.duration_seconds,
         "quality_assets": project.quality_assets,
+    }
+
+
+async def restore_upload_source_from_cloudinary(project: Project) -> dict:
+    """Re-materialize a manual-upload project from Cloudinary after temp disk wipe."""
+    if not project.cloudinary_raw_url:
+        raise FileNotFoundError(
+            "Original upload is gone from the server and no Cloudinary backup exists. "
+            "Please upload the video again."
+        )
+
+    project_id = str(project.id)
+    project.status = ProjectStatus.DOWNLOADING
+    metadata = dict(project.metadata or {})
+    metadata.pop("error_message", None)
+    metadata["source"] = "upload"
+    project.metadata = metadata
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+    project_dir = Path(settings.temp_dir) / project_id
+    qualities_dir = project_dir / "qualities"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    qualities_dir.mkdir(parents=True, exist_ok=True)
+
+    dest_path = project_dir / "raw_video.mp4"
+    await CloudinaryService().download_to_path(project.cloudinary_raw_url, str(dest_path))
+
+    ffmpeg_service = FfmpegService()
+    duration = await ffmpeg_service.probe_duration(str(dest_path))
+    dims = await ffmpeg_service.probe_dimensions(str(dest_path))
+    probed_height = dims[1] if dims else None
+    bucket = nearest_target_quality(probed_height)
+    clip_key = quality_key(project.clip_source_quality or settings.clip_source_quality or "720")
+
+    quality_path = qualities_dir / f"{bucket}.mp4"
+    if dest_path.resolve() != quality_path.resolve():
+        shutil.copy2(dest_path, quality_path)
+
+    assets = init_quality_assets()
+    for key, asset in assets.items():
+        if key == bucket:
+            assets[key] = {
+                **empty_quality_asset(key),
+                "status": "ready",
+                "local_path": str(quality_path),
+                "file_size_bytes": quality_path.stat().st_size,
+                "height": probed_height or int(key),
+                "host": host_for_quality(key),
+                "host_status": "pending",
+            }
+        else:
+            assets[key] = {
+                **empty_quality_asset(key, status="missing"),
+                "host_status": "skipped",
+                "host_error": "Not provided in single-file upload",
+            }
+
+    project.local_video_path = str(quality_path)
+    project.duration_seconds = duration or project.duration_seconds
+    project.quality_assets = assets
+    project.clip_source_quality = clip_key
+    project.status = ProjectStatus.READY
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+    from app.models.clip import Clip, ClipStatus
+
+    clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == project.user_id).to_list()
+    reprocessed = 0
+    for clip in clips:
+        if clip.status in (ClipStatus.READY, ClipStatus.ERROR, ClipStatus.PENDING, ClipStatus.PROCESSING):
+            await run_clip_processing(project_id, str(clip.id))
+            reprocessed += 1
+
+    return {
+        "project_id": project_id,
+        "status": project.status.value,
+        "reprocessed_clips": reprocessed,
+        "local_video_path": project.local_video_path,
     }
 
 
