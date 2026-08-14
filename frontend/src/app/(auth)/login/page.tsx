@@ -40,12 +40,21 @@ export default function LoginPage() {
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    const nextEmail = String(formData.get("email") || email).trim()
+    const nextPassword = String(formData.get("password") || password)
+    setEmail(nextEmail)
+    setPassword(nextPassword)
     setError(null)
     setIsSubmitting(true)
 
     try {
       const response = await withTransientRetry(
-        () => api.post("/api/v1/auth/login", { email, password }, { timeout: 90000 }),
+        () => api.post(
+          "/api/v1/auth/login",
+          { email: nextEmail, password: nextPassword },
+          { timeout: 90000 },
+        ),
       )
       const accessToken = response.data?.access_token
       const refreshToken = response.data?.refresh_token
@@ -93,12 +102,14 @@ export default function LoginPage() {
             </label>
             <input
               id="email"
+              name="email"
               type="email"
               placeholder="name@company.com"
               autoComplete="email"
               required
               value={email}
               onChange={(event) => setEmail(event.target.value)}
+              onInput={(event) => setEmail(event.currentTarget.value)}
               className="h-11 w-full rounded-lg border border-[#c3c6d7] bg-transparent px-3 text-sm text-[#191b23] transition-all focus:border-[#2563eb] focus:outline-none focus:ring-2 focus:ring-[#2563eb]/20"
             />
           </div>
@@ -113,12 +124,14 @@ export default function LoginPage() {
             <div className="relative">
               <input
                 id="password"
+                name="password"
                 type={showPassword ? "text" : "password"}
                 placeholder="••••••••"
                 autoComplete="current-password"
                 required
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                onInput={(event) => setPassword(event.currentTarget.value)}
                 className="h-11 w-full rounded-lg border border-[#c3c6d7] bg-transparent px-3 pr-11 text-sm text-[#191b23] transition-all focus:border-[#2563eb] focus:outline-none focus:ring-2 focus:ring-[#2563eb]/20"
               />
               <button

@@ -34,20 +34,32 @@ export default function SignupPage() {
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    const nextFirstName = String(formData.get("firstName") || firstName).trim()
+    const nextLastName = String(formData.get("lastName") || lastName).trim()
+    const nextEmail = String(formData.get("email") || email).trim()
+    const nextPassword = String(formData.get("password") || password)
+    const nextConfirmPassword = String(formData.get("confirmPassword") || confirmPassword)
+    setFirstName(nextFirstName)
+    setLastName(nextLastName)
+    setEmail(nextEmail)
+    setPassword(nextPassword)
+    setConfirmPassword(nextConfirmPassword)
     setError(null)
 
-    if (password !== confirmPassword) {
+    if (nextPassword !== nextConfirmPassword) {
       setError("Passwords do not match.")
       return
     }
 
     setIsSubmitting(true)
     try {
-      const fullName = `${firstName} ${lastName}`.trim()
+
+      const fullName = `${nextFirstName} ${nextLastName}`.trim()
       const response = await withTransientRetry(
         () => api.post("/api/v1/auth/register", {
-          email,
-          password,
+          email: nextEmail,
+          password: nextPassword,
           full_name: fullName || null,
         }, { timeout: 90000 }),
       )
@@ -101,9 +113,11 @@ export default function SignupPage() {
                 </label>
                 <input
                   id="firstName"
+                  name="firstName"
                   required
                   value={firstName}
                   onChange={(event) => setFirstName(event.target.value)}
+                  onInput={(event) => setFirstName(event.currentTarget.value)}
                   className="h-9 w-full border-0 border-b border-[#c3c6d7] bg-transparent px-0 text-base outline-none transition-all focus:border-[#004ac6] focus:ring-0"
                   placeholder="Jane"
                 />
@@ -114,9 +128,11 @@ export default function SignupPage() {
                 </label>
                 <input
                   id="lastName"
+                  name="lastName"
                   required
                   value={lastName}
                   onChange={(event) => setLastName(event.target.value)}
+                  onInput={(event) => setLastName(event.currentTarget.value)}
                   className="h-9 w-full border-0 border-b border-[#c3c6d7] bg-transparent px-0 text-base outline-none transition-all focus:border-[#004ac6] focus:ring-0"
                   placeholder="Doe"
                 />
@@ -129,10 +145,13 @@ export default function SignupPage() {
               </label>
               <input
                 id="email"
+                name="email"
                 type="email"
+                autoComplete="email"
                 required
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
+                onInput={(event) => setEmail(event.currentTarget.value)}
                 className="h-9 w-full border-0 border-b border-[#c3c6d7] bg-transparent px-0 text-base outline-none transition-all focus:border-[#004ac6] focus:ring-0"
                 placeholder="jane@example.com"
               />
@@ -145,10 +164,13 @@ export default function SignupPage() {
               <div className="relative">
                 <input
                   id="password"
+                  name="password"
                   type={showPassword ? "text" : "password"}
+                  autoComplete="new-password"
                   required
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
+                  onInput={(event) => setPassword(event.currentTarget.value)}
                   className="h-9 w-full border-0 border-b border-[#c3c6d7] bg-transparent px-0 pr-10 text-base outline-none transition-all focus:border-[#004ac6] focus:ring-0"
                   placeholder="••••••••"
                 />
@@ -184,10 +206,13 @@ export default function SignupPage() {
               <div className="relative">
                 <input
                   id="confirmPassword"
+                  name="confirmPassword"
                   type={showConfirmPassword ? "text" : "password"}
+                  autoComplete="new-password"
                   required
                   value={confirmPassword}
                   onChange={(event) => setConfirmPassword(event.target.value)}
+                  onInput={(event) => setConfirmPassword(event.currentTarget.value)}
                   className="h-9 w-full border-0 border-b border-[#c3c6d7] bg-transparent px-0 pr-10 text-base outline-none transition-all focus:border-[#004ac6] focus:ring-0"
                   placeholder="••••••••"
                 />
