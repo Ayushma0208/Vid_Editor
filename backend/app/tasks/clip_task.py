@@ -124,20 +124,34 @@ async def ensure_clip_source_quality(project: Project) -> str | None:
     do not re-encode the entire film first (that blocked generation for long uploads).
     """
     existing = _resolve_clip_source_path(project)
-    if not existing:
-        return None
+    if existing:
+        meta = dict(project.metadata or {})
+        if meta.pop("auto_clip_warning", None) is not None:
+            project.metadata = meta
+            project.local_video_path = existing
+            project.updated_at = datetime.now(timezone.utc)
+            await project.save()
+        elif not project.local_video_path:
+            project.local_video_path = existing
+            project.updated_at = datetime.now(timezone.utc)
+            await project.save()
+        return existing
 
-    meta = dict(project.metadata or {})
-    if meta.pop("auto_clip_warning", None) is not None:
-        project.metadata = meta
-        project.local_video_path = existing
-        project.updated_at = datetime.now(timezone.utc)
-        await project.save()
-    elif not project.local_video_path:
-        project.local_video_path = existing
-        project.updated_at = datetime.now(timezone.utc)
-        await project.save()
-    return existing
+    if project.cloudinary_raw_url:
+        temp_dir = Path(settings.temp_dir) / str(project.id)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        raw_video_path = str(temp_dir / "raw_video.mp4")
+        if not Path(raw_video_path).is_file():
+            await CloudinaryService().download_to_path(project.cloudinary_raw_url, raw_video_path)
+        if Path(raw_video_path).is_file():
+            project.local_video_path = raw_video_path
+            meta = dict(project.metadata or {})
+            meta.pop("auto_clip_warning", None)
+            project.metadata = meta
+            project.updated_at = datetime.now(timezone.utc)
+            await project.save()
+            return raw_video_path
+    return None
 
 
 async def _acquire_raw_video(project: Project, project_id: str) -> str:
@@ -345,8 +359,8 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
             await ffmpeg_service.concat_videos(clip_output_path, ad_clip_path, final_clip_path)
             upload_path = final_clip_path
 
-        shutil.copy2(upload_path, saved_clip_path)
-        shutil.copy2(thumbnail_output_path, saved_thumb_path)
+        await asyncio.to_thread(shutil.copy2, upload_path, saved_clip_path)
+        await asyncio.to_thread(shutil.copy2, thumbnail_output_path, saved_thumb_path)
 
         clip.local_clip_path = saved_clip_path
         clip.local_thumbnail_path = saved_thumb_path

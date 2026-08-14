@@ -28,7 +28,7 @@ from app.tasks.download_task import (
 )
 from app.tasks.quality_distribute_task import trigger_distribute_project_qualities
 from app.tasks.summary_task import trigger_project_summary
-from app.tasks.upload_task import retry_upload_processing
+from app.tasks.upload_task import is_upload_project, retry_upload_processing
 from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, get_ffmpeg_path, get_ffprobe_path
 
 
@@ -128,13 +128,18 @@ async def generate_local_thumbnail(video_path: Path, output_path: Path) -> bool:
 
 
 async def _run_download_pipeline_background(project_id: str, video_url: str) -> None:
+    from app.services.pipeline_runtime import release_pipeline
+
     project = await Project.get(project_id)
     if not project:
+        release_pipeline(project_id)
         return
     try:
         await _run_download_pipeline(project_id, video_url)
     except Exception as exc:
         await _set_project_error(project, str(exc))
+    finally:
+        release_pipeline(project_id)
 
 
 async def _run_refetch_pipeline_background(project_id: str, video_url: str) -> None:
@@ -153,6 +158,8 @@ async def trigger_refetch_source(project_id: str, video_url: str) -> dict[str, A
 
 
 async def trigger_download(project_id: str, video_url: str) -> dict[str, Any]:
+    from app.services.pipeline_runtime import claim_pipeline, release_pipeline
+
     try:
         task = download_video_task.delay(project_id, video_url)
         inspector = await asyncio.to_thread(download_video_task.app.control.inspect, timeout=0.5)
@@ -162,7 +169,12 @@ async def trigger_download(project_id: str, video_url: str) -> dict[str, Any]:
     except Exception:
         pass
 
-    asyncio.create_task(_run_download_pipeline_background(project_id, video_url))
+    claim_pipeline(project_id)
+    try:
+        asyncio.create_task(_run_download_pipeline_background(project_id, video_url))
+    except Exception:
+        release_pipeline(project_id)
+        raise
     return {"task_id": None, "execution_mode": "local-background"}
 
 
@@ -319,22 +331,46 @@ async def seed_dummy_project(
 @router.get("/")
 async def list_projects(user_id: str = Depends(get_current_user_id)):
     projects = await Project.find(Project.user_id == user_id).sort("-created_at").to_list()
+    try:
+        from app.services.pipeline_runtime import resume_stale_project
+
+        for project in projects:
+            if project.status in (ProjectStatus.PENDING, ProjectStatus.DOWNLOADING):
+                await resume_stale_project(project)
+    except Exception:
+        pass
     return [serialize_document(project) for project in projects]
 
 
 @router.get("/{project_id}")
 async def get_project(project_id: str, user_id: str = Depends(get_current_user_id)):
-    project = await Project.get(project_id)
+    try:
+        project = await Project.get(project_id)
+    except Exception:
+        project = None
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    try:
+        from app.services.pipeline_runtime import resume_stale_project
+
+        await resume_stale_project(project)
+        project = await Project.get(project_id) or project
+    except Exception:
+        pass
 
     data = serialize_document(project)
     data["download_status"] = project.status
     local_path = Path(project.local_video_path) if project.local_video_path else None
-    from app.tasks.clip_task import _resolve_clip_source_path
     from app.tasks.upload_task import is_upload_project
 
-    usable = _resolve_clip_source_path(project)
+    usable = None
+    try:
+        from app.tasks.clip_task import _resolve_clip_source_path
+
+        usable = _resolve_clip_source_path(project)
+    except Exception:
+        usable = None
     data["source_file_available"] = bool(usable or (local_path and local_path.is_file()))
     data["is_upload"] = is_upload_project(project)
     data["has_cloudinary_raw"] = bool(project.cloudinary_raw_url)
@@ -359,8 +395,7 @@ async def retry_processing(
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    metadata = project.metadata or {}
-    if metadata.get("source") != "upload":
+    if not is_upload_project(project):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Retry processing is only available for uploaded videos.",
@@ -390,7 +425,11 @@ async def retry_download(project_id: str, user_id: str = Depends(get_current_use
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
-    if project.status not in (ProjectStatus.PENDING, ProjectStatus.ERROR):
+    if project.status not in (
+        ProjectStatus.PENDING,
+        ProjectStatus.DOWNLOADING,
+        ProjectStatus.ERROR,
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot retry download — project status is '{project.status.value}'",

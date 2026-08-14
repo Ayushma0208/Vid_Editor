@@ -12,6 +12,7 @@ type ProjectItem = {
   thumbnail_url?: string | null
   duration_seconds?: number | null
   created_at?: string
+  yt_url?: string
   metadata?: Record<string, unknown> | null
 }
 
@@ -145,7 +146,7 @@ export default function DashboardPage() {
     try {
       const formData = new FormData()
       formData.append("file", uploadFile)
-      await api.post("/api/v1/uploads", formData, {
+      const response = await api.post("/api/v1/uploads", formData, {
         timeout: 0,
         onUploadProgress: (e) => {
           if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total))
@@ -154,6 +155,11 @@ export default function DashboardPage() {
       setUploadFile(null)
       setUploadProgress(0)
       setIsModalOpen(false)
+      const createdId = response.data?.id as string | undefined
+      if (createdId) {
+        router.push(`/project/${createdId}/clips`)
+        return
+      }
       await loadProjects()
     } catch (err: unknown) {
       const res = (err as { response?: { status?: number; data?: { detail?: string } } })?.response
@@ -189,13 +195,22 @@ export default function DashboardPage() {
     }
   }
 
-  const handleRetryDownload = async (e: React.MouseEvent, projectId: string) => {
+  const handleRetryDownload = async (e: React.MouseEvent, project: ProjectItem) => {
     e.stopPropagation()
+    const projectId = project.id || project._id || ""
+    if (!projectId) return
     setRetrying((prev) => new Set(prev).add(projectId))
     try {
-      await api.post(`/api/v1/projects/${projectId}/retry-download`)
+      const isUpload =
+        (project.metadata?.source === "upload") ||
+        (project.yt_url || "").startsWith("upload://")
+      await api.post(
+        isUpload
+          ? `/api/v1/projects/${projectId}/retry-processing`
+          : `/api/v1/projects/${projectId}/retry-download`,
+      )
       await loadProjects()
-    } catch { setError("Retry failed.") }
+    } catch { setError("Retry failed. If this was an old upload, please upload the video again.") }
     finally {
       setRetrying((prev) => { const next = new Set(prev); next.delete(projectId); return next })
     }
@@ -430,7 +445,7 @@ export default function DashboardPage() {
                 const id = project.id || project._id || ""
                 const st = (project.status || "pending").toLowerCase()
                 const badge = statusBadge(st)
-                const isRetryable = st === "error"
+                const isRetryable = st === "error" || st === "downloading" || st === "pending"
                 const isRetryingThis = retrying.has(id)
                 const isDeletingThis = deleting.has(id)
                 const isHovered = hoveredCard === id
@@ -488,7 +503,7 @@ export default function DashboardPage() {
                       <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
                         {isRetryable && (
                           <button
-                            onClick={(e) => handleRetryDownload(e, id)}
+                            onClick={(e) => handleRetryDownload(e, project)}
                             disabled={isRetryingThis || isDeletingThis}
                             className="rounded-md bg-[#5b6ef5]/20 px-2 py-1 text-[11px] font-medium text-[#7c8df8] hover:bg-[#5b6ef5]/30 disabled:opacity-50 transition-all"
                           >

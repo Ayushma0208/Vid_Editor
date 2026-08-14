@@ -116,7 +116,7 @@ async def _download_multi_quality(project: Project, video_url: str) -> dict[str,
                 if src.resolve() != dest.resolve():
                     if dest.exists():
                         dest.unlink()
-                    shutil.move(str(src), str(dest))
+                    await asyncio.to_thread(shutil.move, str(src), str(dest))
                     local_path = str(dest)
 
                 size = Path(local_path).stat().st_size if Path(local_path).is_file() else None
@@ -159,7 +159,7 @@ async def _download_multi_quality(project: Project, video_url: str) -> dict[str,
         if src.is_file():
             if dest.exists():
                 dest.unlink()
-            shutil.copy2(src, dest)
+            await asyncio.to_thread(shutil.copy2, src, dest)
             assets[clip_key] = {
                 **empty_quality_asset(clip_key),
                 "status": "ready",

@@ -114,6 +114,12 @@ async def on_startup() -> None:
         print(f"[startup] FFprobe: {get_ffprobe_path()}")
     else:
         print("[startup] WARNING: FFmpeg/ffprobe not found — video processing will fail")
+    try:
+        from app.services.pipeline_runtime import recover_stale_pipelines
+
+        await recover_stale_pipelines()
+    except Exception as exc:
+        print(f"[startup] WARNING: stale pipeline recovery failed: {exc}")
 
 
 @app.get("/")

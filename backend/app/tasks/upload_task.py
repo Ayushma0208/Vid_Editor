@@ -88,7 +88,7 @@ async def _run_upload_pipeline(project_id: str, source_path: Path) -> dict:
 
     ffmpeg_service = FfmpegService()
     if ext == ".mp4" and source_path.resolve() != dest_path.resolve():
-        shutil.copy2(source_path, dest_path)
+        await asyncio.to_thread(shutil.copy2, source_path, dest_path)
     elif ext == ".mp4":
         dest_path = source_path
     else:
@@ -112,7 +112,7 @@ async def _run_upload_pipeline(project_id: str, source_path: Path) -> dict:
     qualities_dir.mkdir(parents=True, exist_ok=True)
     quality_path = qualities_dir / f"{bucket}.mp4"
     if Path(dest_path).resolve() != quality_path.resolve():
-        shutil.copy2(dest_path, quality_path)
+        await asyncio.to_thread(shutil.copy2, dest_path, quality_path)
 
     assets = init_quality_assets()
     for key, asset in assets.items():
@@ -251,7 +251,7 @@ async def restore_upload_source_from_cloudinary(project: Project) -> dict:
 
     quality_path = qualities_dir / f"{bucket}.mp4"
     if dest_path.resolve() != quality_path.resolve():
-        shutil.copy2(dest_path, quality_path)
+        await asyncio.to_thread(shutil.copy2, dest_path, quality_path)
 
     assets = init_quality_assets()
     for key, asset in assets.items():
@@ -298,8 +298,11 @@ async def restore_upload_source_from_cloudinary(project: Project) -> dict:
 
 
 async def _run_upload_pipeline_background(project_id: str, source_path: Path) -> None:
+    from app.services.pipeline_runtime import release_pipeline
+
     project = await Project.get(PydanticObjectId(project_id))
     if not project:
+        release_pipeline(project_id)
         return
     succeeded = False
     try:
@@ -311,6 +314,7 @@ async def _run_upload_pipeline_background(project_id: str, source_path: Path) ->
         if fresh:
             await _set_project_error(fresh, format_exception(exc))
     finally:
+        release_pipeline(project_id)
         uploads_root = str((Path(settings.temp_dir) / "uploads").resolve())
         if (
             succeeded
@@ -324,24 +328,53 @@ async def _run_upload_pipeline_background(project_id: str, source_path: Path) ->
 
 
 async def retry_upload_processing(project: Project, background_tasks: BackgroundTasks) -> None:
-    metadata = project.metadata or {}
-    original_filename = metadata.get("original_filename")
-    if not original_filename:
-        raise ValueError("Missing original upload filename for retry")
+    from app.services.pipeline_runtime import claim_pipeline, pipeline_claimed
 
-    source_path = staging_upload_path(project.user_id, str(original_filename))
-    if not source_path.is_file() and project.local_video_path:
+    project_id = str(project.id)
+    if pipeline_claimed(project_id):
+        return
+
+    metadata = dict(project.metadata or {})
+    original_filename = metadata.get("original_filename")
+    source_path = staging_upload_path(project.user_id, str(original_filename)) if original_filename else None
+    if (source_path is None or not source_path.is_file()) and project.local_video_path:
         source_path = Path(project.local_video_path)
 
-    if not source_path.is_file():
-        raise FileNotFoundError(
-            "Original upload file is no longer on the server. Please upload the video again."
-        )
+    if source_path is not None and source_path.is_file():
+        project.status = ProjectStatus.PENDING
+        metadata.pop("error_message", None)
+        project.metadata = metadata
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+        claim_pipeline(project_id)
+        background_tasks.add_task(_run_upload_pipeline_background, project_id, source_path)
+        return
 
-    project.status = ProjectStatus.PENDING
-    metadata.pop("error_message", None)
-    project.metadata = metadata
-    project.updated_at = datetime.now(timezone.utc)
-    await project.save()
+    if project.cloudinary_raw_url:
+        project.status = ProjectStatus.PENDING
+        metadata.pop("error_message", None)
+        project.metadata = metadata
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+        claim_pipeline(project_id)
 
-    background_tasks.add_task(_run_upload_pipeline_background, str(project.id), source_path)
+        async def _restore() -> None:
+            from app.services.pipeline_runtime import release_pipeline
+
+            try:
+                await restore_upload_source_from_cloudinary(project)
+                await start_local_clip_generation(project_id, settings.default_clip_duration_seconds)
+            except Exception as exc:
+                logger.exception("Cloudinary restore failed for project %s", project_id)
+                fresh = await Project.get(PydanticObjectId(project_id))
+                if fresh:
+                    await _set_project_error(fresh, format_exception(exc))
+            finally:
+                release_pipeline(project_id)
+
+        background_tasks.add_task(_restore)
+        return
+
+    raise FileNotFoundError(
+        "Original upload file is no longer on the server. Please upload the video again."
+    )

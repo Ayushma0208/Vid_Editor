@@ -116,6 +116,9 @@ async def create_project_from_upload(
     project.yt_video_id = f"upload-{project.id}"
     await project.save()
 
+    from app.services.pipeline_runtime import claim_pipeline
+
+    claim_pipeline(str(project.id))
     background_tasks.add_task(_run_upload_pipeline_background, str(project.id), temp_path)
 
     response = serialize_document(project)

@@ -335,19 +335,34 @@ export default function ProjectClipsPage() {
   const [isDownloadingAll, setIsDownloadingAll] = useState(false)
   const [isRefetchingSource, setIsRefetchingSource] = useState(false)
   const [saveNotice, setSaveNotice] = useState<string | null>(null)
+  const hasLoadedProject = useRef(false)
 
   const token = typeof window !== "undefined" ? localStorage.getItem("token") || "" : ""
 
   const loadProject = useCallback(async () => {
     try {
-      const [projRes, clipsRes] = await Promise.all([
-        api.get(`/api/v1/projects/${projectId}`),
-        api.get(`/api/v1/projects/${projectId}/clips`),
-      ])
+      const projRes = await api.get(`/api/v1/projects/${projectId}`, { timeout: 60000 })
       setProject(projRes.data)
-      setClips(Array.isArray(clipsRes.data) ? clipsRes.data : [])
-    } catch {
-      setError("Could not load project.")
+      hasLoadedProject.current = true
+      setError(null)
+      try {
+        const clipsRes = await api.get(`/api/v1/projects/${projectId}/clips`, { timeout: 60000 })
+        setClips(Array.isArray(clipsRes.data) ? clipsRes.data : [])
+      } catch {
+        // Project loaded; clips can appear on the next poll.
+      }
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number } })?.response?.status
+      const isTimeout =
+        (err as { code?: string })?.code === "ECONNABORTED" ||
+        String((err as { message?: string })?.message || "").toLowerCase().includes("timeout")
+      if (!hasLoadedProject.current) {
+        setError(
+          isTimeout || !status
+            ? "Server is still processing this video. Retrying…"
+            : "Could not load project."
+        )
+      }
     } finally {
       setLoading(false)
     }
@@ -360,17 +375,18 @@ export default function ProjectClipsPage() {
     loadProject()
   }, [loadProject, router, projectId])
 
-  // Poll while project is processing or clips are in progress
+  // Poll while project is processing, clips are in progress, or first load is still retrying
   useEffect(() => {
     const projectBusy = ["downloading", "pending"].includes((project?.status || "").toLowerCase())
     const clipsBusy = clips.some((c) => {
       const s = (c.status || "").toLowerCase()
       return s === "processing" || s === "pending"
     })
-    if (!projectBusy && !clipsBusy) return
-    const interval = setInterval(loadProject, 5000)
+    const waitingToLoad = !project && /processing|retrying/i.test(error || "")
+    if (!projectBusy && !clipsBusy && !waitingToLoad) return
+    const interval = setInterval(loadProject, waitingToLoad ? 3000 : 5000)
     return () => clearInterval(interval)
-  }, [clips, project?.status, loadProject])
+  }, [clips, project?.status, loadProject, project, error])
 
   const handleClipDeleted = (clipId: string) => {
     setClips((prev) => prev.filter((c) => (c.id || c._id) !== clipId))
@@ -382,7 +398,15 @@ export default function ProjectClipsPage() {
     setIsRetrying(true)
     setError(null)
     try {
-      await api.post(`/api/v1/projects/${projectId}/retry-processing`)
+      const upload =
+        project?.is_upload === true ||
+        project?.metadata?.source === "upload" ||
+        (project?.yt_url || "").startsWith("upload://")
+      await api.post(
+        upload
+          ? `/api/v1/projects/${projectId}/retry-processing`
+          : `/api/v1/projects/${projectId}/retry-download`,
+      )
       await loadProject()
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -513,9 +537,17 @@ export default function ProjectClipsPage() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#f8fbff]">
         <p className="text-sm text-red-500">{error || "Project not found."}</p>
-        <button onClick={() => router.push("/dashboard")} className="text-sm font-medium text-[#1a73e8] hover:underline">
-          ← Back to Dashboard
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { setLoading(true); setError(null); void loadProject() }}
+            className="rounded-lg bg-[#2563eb] px-4 py-2 text-sm font-medium text-white"
+          >
+            Retry
+          </button>
+          <button onClick={() => router.push("/dashboard")} className="text-sm font-medium text-[#1a73e8] hover:underline">
+            ← Back to Dashboard
+          </button>
+        </div>
       </div>
     )
   }
@@ -596,13 +628,13 @@ export default function ProjectClipsPage() {
               {isDownloadingAll ? "Saving…" : `Save all to hosting (${readyCount})`}
             </button>
           )}
-          {projectStatus === "error" && isUpload && (
+          {(projectStatus === "error" || isProcessingUpload) && (
             <button
               onClick={handleRetryProcessing}
               disabled={isRetrying}
               className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-500/20 disabled:opacity-50 transition-all"
             >
-              {isRetrying ? "Retrying…" : "Retry processing"}
+              {isRetrying ? "Retrying…" : isProcessingUpload ? "Resume processing" : "Retry processing"}
             </button>
           )}
           {canGenerate && (
@@ -785,15 +817,17 @@ export default function ProjectClipsPage() {
             <p className="mt-1 text-xs text-[#3a3d52]">
               {projectStatus === "error"
                 ? "Fix the error above, then retry or upload again"
-                : "Clips are created automatically after upload, or click below to split again"}
+                : isProcessingUpload
+                  ? "Video is still processing. 60-second clips will appear here automatically."
+                  : "Clips are created automatically after upload, or click below to split again"}
             </p>
-            {projectStatus === "error" && isUpload && (
+            {(projectStatus === "error" || isProcessingUpload) && (
               <button
                 onClick={handleRetryProcessing}
                 disabled={isRetrying}
                 className="mt-5 flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-5 py-2 text-xs font-semibold text-red-600 hover:bg-red-500/20 disabled:opacity-50 transition-all"
               >
-                {isRetrying ? "Retrying…" : "Retry processing"}
+                {isRetrying ? "Retrying…" : isProcessingUpload ? "Resume processing" : "Retry processing"}
               </button>
             )}
             {canGenerate && (
