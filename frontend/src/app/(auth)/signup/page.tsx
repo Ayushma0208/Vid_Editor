@@ -1,8 +1,8 @@
 "use client"
 
-import { FormEvent, useMemo, useState } from "react"
+import { FormEvent, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import api from "@/lib/api"
+import api, { isTransientNetworkError, wakeApiServer, withTransientRetry } from "@/lib/api"
 import { dmSans, jetBrainsMono, syne } from "@/lib/fonts"
 
 export default function SignupPage() {
@@ -16,6 +16,10 @@ export default function SignupPage() {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    wakeApiServer()
+  }, [])
 
   const passwordStrength = useMemo(() => {
     let score = 0
@@ -40,11 +44,13 @@ export default function SignupPage() {
     setIsSubmitting(true)
     try {
       const fullName = `${firstName} ${lastName}`.trim()
-      const response = await api.post("/api/v1/auth/register", {
-        email,
-        password,
-        full_name: fullName || null,
-      })
+      const response = await withTransientRetry(
+        () => api.post("/api/v1/auth/register", {
+          email,
+          password,
+          full_name: fullName || null,
+        }, { timeout: 90000 }),
+      )
       const accessToken = response.data?.access_token
       const refreshToken = response.data?.refresh_token
 
@@ -57,6 +63,8 @@ export default function SignupPage() {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       if (status === 409) {
         setError(typeof detail === "string" ? detail : "This email is already registered. Please sign in instead.")
+      } else if (isTransientNetworkError(err)) {
+        setError("The server is starting up. Please try again in a moment.")
       } else if (typeof detail === "string" && detail.trim()) {
         setError(detail)
       } else {

@@ -13,9 +13,9 @@ from app.models.user import User
 
 def _mongo_client_kwargs(uri: str) -> dict:
     common = {
-        "serverSelectionTimeoutMS": 5000,
-        "connectTimeoutMS": 5000,
-        "socketTimeoutMS": 5000,
+        "serverSelectionTimeoutMS": 15000,
+        "connectTimeoutMS": 10000,
+        "socketTimeoutMS": 15000,
     }
     if uri.startswith("mongodb+srv://") or "tls=true" in uri.lower():
         return {**common, "tlsCAFile": certifi.where()}

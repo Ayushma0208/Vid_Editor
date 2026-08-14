@@ -1,9 +1,30 @@
 "use client"
 
-import { FormEvent, useState } from "react"
+import { FormEvent, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import api from "@/lib/api"
+import axios from "axios"
+import api, { wakeApiServer, withTransientRetry } from "@/lib/api"
 import { dmSans, jetBrainsMono, syne } from "@/lib/fonts"
+
+function loginErrorMessage(error: unknown): string {
+  if (axios.isAxiosError(error)) {
+    if (error.code === "ECONNABORTED" || error.message.toLowerCase().includes("timeout")) {
+      return "The server is still starting up. Please try signing in again."
+    }
+    if (!error.response) {
+      return "Unable to reach the server. Please try again in a moment."
+    }
+    if (error.response.status === 401) {
+      return "Invalid email or password. Please try again."
+    }
+    if ([502, 503, 504].includes(error.response.status)) {
+      return "The server is starting up. Please try signing in again."
+    }
+    const detail = error.response.data?.detail
+    if (typeof detail === "string" && detail.trim()) return detail
+  }
+  return "Unable to sign in. Please try again."
+}
 
 export default function LoginPage() {
   const router = useRouter()
@@ -13,16 +34,19 @@ export default function LoginPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  useEffect(() => {
+    wakeApiServer()
+  }, [])
+
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError(null)
     setIsSubmitting(true)
 
     try {
-      const response = await api.post("/api/v1/auth/login", {
-        email,
-        password,
-      })
+      const response = await withTransientRetry(
+        () => api.post("/api/v1/auth/login", { email, password }, { timeout: 90000 }),
+      )
       const accessToken = response.data?.access_token
       const refreshToken = response.data?.refresh_token
 
@@ -33,8 +57,8 @@ export default function LoginPage() {
       localStorage.setItem("token", accessToken)
       if (refreshToken) localStorage.setItem("refresh_token", refreshToken)
       router.push("/dashboard")
-    } catch {
-      setError("Invalid email or password. Please try again.")
+    } catch (err) {
+      setError(loginErrorMessage(err))
     } finally {
       setIsSubmitting(false)
     }
