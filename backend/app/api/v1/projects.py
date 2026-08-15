@@ -23,7 +23,13 @@ from app.services.project_upload import (
 )
 from app.services.quality_host_routing import TARGET_QUALITY_KEYS, build_quality_distribute_plan, quality_key
 from app.services.ytdlp_service import YTDLPService
-from app.tasks.clip_task import _resolve_clip_source_path, trigger_auto_generate_clips
+from app.tasks.clip_task import (
+    _resolve_clip_source_path,
+    CLOUDINARY_SYNC_KEY,
+    trigger_auto_generate_clips,
+    trigger_upload_project_clips_to_cloudinary,
+)
+from app.services.cloudinary_service import CloudinaryService
 from app.tasks.download_task import (
     _run_download_pipeline,
     _run_refetch_pipeline,
@@ -643,6 +649,87 @@ async def generate_clips(
         "segment_seconds": segment_seconds,
         "clip_source_quality": clip_key,
         "message": f"Generating {segment_seconds}-second clips",
+    }
+
+
+@router.get("/{project_id}/clips/upload-cloudinary")
+async def get_cloudinary_clip_upload_status(
+    project_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
+    with_url = sum(1 for c in clips if c.cloudinary_clip_url)
+    sync = dict((project.metadata or {}).get(CLOUDINARY_SYNC_KEY) or {})
+    return {
+        "project_id": project_id,
+        "cloudinary_configured": CloudinaryService().is_configured(),
+        "total": len(clips),
+        "uploaded": with_url,
+        "missing": max(0, len(clips) - with_url),
+        "status": sync.get("status") or ("done" if with_url == len(clips) else "idle"),
+        "failed": int(sync.get("failed") or 0),
+        "error": sync.get("error"),
+        "processing_step": (project.metadata or {}).get("processing_step"),
+    }
+
+
+@router.post("/{project_id}/clips/upload-cloudinary")
+async def upload_project_clips_to_cloudinary(
+    project_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if not CloudinaryService().is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.",
+        )
+    clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == user_id).to_list()
+    missing = [c for c in clips if not c.cloudinary_clip_url]
+    sync = dict((project.metadata or {}).get(CLOUDINARY_SYNC_KEY) or {})
+    if not missing:
+        return {
+            "project_id": project_id,
+            "status": "done",
+            "total": len(clips),
+            "missing": 0,
+            "message": "All clips already have Cloudinary URLs.",
+        }
+    if sync.get("status") == "running":
+        return {
+            "project_id": project_id,
+            "status": "running",
+            "total": len(clips),
+            "missing": len(missing),
+            "message": "Cloudinary clip upload is already running.",
+        }
+    meta = dict(project.metadata or {})
+    meta[CLOUDINARY_SYNC_KEY] = {
+        "status": "running",
+        "total": len(clips),
+        "missing": len(missing),
+        "uploaded": 0,
+        "failed": 0,
+        "error": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    project.metadata = meta
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+    trigger = await trigger_upload_project_clips_to_cloudinary(project_id)
+    return {
+        "project_id": project_id,
+        "status": "running",
+        "total": len(clips),
+        "missing": len(missing),
+        "task_id": trigger.get("task_id"),
+        "execution_mode": trigger.get("execution_mode"),
+        "message": f"Uploading {len(missing)} clip(s) to Cloudinary for Instagram.",
     }
 
 

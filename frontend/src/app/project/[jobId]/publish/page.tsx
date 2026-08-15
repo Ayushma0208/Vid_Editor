@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import api from "@/lib/api"
 
@@ -192,6 +192,10 @@ export default function PublishPage() {
   const [qualityRows, setQualityRows] = useState<QualityAssetRow[]>([])
   const [clipsExpireAt, setClipsExpireAt] = useState<string | null>(null)
   const [retryingQualities, setRetryingQualities] = useState(false)
+  const [cloudinarySyncing, setCloudinarySyncing] = useState(false)
+  const [cloudinarySyncError, setCloudinarySyncError] = useState<string | null>(null)
+  const [cloudinarySyncStep, setCloudinarySyncStep] = useState<string | null>(null)
+  const cloudinarySyncStarted = useRef(false)
   const [showClipDistribute, setShowClipDistribute] = useState(false)
   const [publishProgress, setPublishProgress] = useState<{
     queued: number
@@ -268,6 +272,26 @@ export default function PublishPage() {
       setLoading(false)
     }
   }, [projectId])
+
+  const startCloudinarySync = useCallback(async () => {
+    setCloudinarySyncError(null)
+    setCloudinarySyncing(true)
+    try {
+      const response = await api.post(`/api/v1/projects/${projectId}/clips/upload-cloudinary`)
+      setCloudinarySyncStep(response.data?.message || "Uploading clips to Cloudinary…")
+      if (response.data?.status === "done") {
+        setCloudinarySyncing(false)
+        await loadClips()
+      }
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setCloudinarySyncError(detail || "Could not upload clips to Cloudinary.")
+      setCloudinarySyncing(false)
+    }
+  }, [projectId, loadClips])
+
+  const missingCloudinaryCount = clips.filter((c) => !c.cloudinary_clip_url).length
+  const uploadedCloudinaryCount = clips.length - missingCloudinaryCount
 
   const loadAuthStatus = useCallback(async () => {
     try {
@@ -375,6 +399,43 @@ export default function PublishPage() {
     loadQualities()
     void fetchCopyPoolCaption()
   }, [loadClips, loadAuthStatus, loadPublishProgress, loadQualities, router]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (loading || clips.length === 0) return
+    if (missingCloudinaryCount === 0) {
+      setCloudinarySyncing(false)
+      return
+    }
+    if (cloudinarySyncStarted.current) return
+    cloudinarySyncStarted.current = true
+    void startCloudinarySync()
+  }, [loading, clips.length, missingCloudinaryCount, startCloudinarySync])
+
+  useEffect(() => {
+    if (!cloudinarySyncing && missingCloudinaryCount === 0) return
+    if (!cloudinarySyncing) return
+    const interval = setInterval(async () => {
+      try {
+        const response = await api.get(`/api/v1/projects/${projectId}/clips/upload-cloudinary`)
+        setCloudinarySyncStep(response.data?.processing_step || null)
+        await loadClips()
+        const missing = Number(response.data?.missing || 0)
+        const status = String(response.data?.status || "")
+        if (missing === 0 || status === "done") {
+          setCloudinarySyncing(false)
+          setCloudinarySyncError(null)
+        } else if (status === "error") {
+          setCloudinarySyncing(false)
+          setCloudinarySyncError(
+            response.data?.error || "Some clips could not be uploaded to Cloudinary."
+          )
+        }
+      } catch {
+        // Keep polling; a single failed status check should not stop the upload.
+      }
+    }, 4000)
+    return () => clearInterval(interval)
+  }, [cloudinarySyncing, missingCloudinaryCount, projectId, loadClips])
 
   useEffect(() => {
     const busy =
@@ -921,10 +982,43 @@ export default function PublishPage() {
             <div className="mb-6">
               <h1 className="text-2xl font-bold">Publish Clips</h1>
               <p className="mt-1 text-sm text-[#434655]">
-                Full movies are sorted by quality at upload (240/480/720/1080) and sent to hosts
-                automatically. Popular clips are cut from 720p and published to Instagram or YouTube.
+                Full movies go to file hosts by quality (240/480/720/1080). Instagram clips are
+                uploaded to Cloudinary so they can be published directly.
               </p>
             </div>
+
+            {(cloudinarySyncing || missingCloudinaryCount > 0 || cloudinarySyncError) && (
+              <div
+                className={`mb-6 rounded-xl border px-4 py-3 ${
+                  cloudinarySyncError
+                    ? "border-amber-200 bg-amber-50"
+                    : "border-sky-200 bg-sky-50"
+                }`}
+              >
+                <p
+                  className={`text-sm ${
+                    cloudinarySyncError ? "text-amber-800" : "text-sky-800"
+                  }`}
+                >
+                  {cloudinarySyncError
+                    ? cloudinarySyncError
+                    : cloudinarySyncStep ||
+                      `Uploading clips to Cloudinary for Instagram (${uploadedCloudinaryCount}/${clips.length})…`}
+                </p>
+                {cloudinarySyncError && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      cloudinarySyncStarted.current = true
+                      void startCloudinarySync()
+                    }}
+                    className="mt-2 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+                  >
+                    Retry Cloudinary upload
+                  </button>
+                )}
+              </div>
+            )}
 
             <section className="mb-6 rounded-xl border border-[#e1e2ed] bg-white p-5 shadow-sm">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -1032,6 +1126,7 @@ export default function PublishPage() {
                     publishingSelected ||
                     retryingFailed ||
                     Boolean(publishProgress?.active) ||
+                    cloudinarySyncing ||
                     !connectedAccounts.instagram ||
                     !effectiveCaption ||
                     recommendedClips.length === 0
@@ -1052,6 +1147,7 @@ export default function PublishPage() {
                     publishingSelected ||
                     retryingFailed ||
                     Boolean(publishProgress?.active) ||
+                    cloudinarySyncing ||
                     !connectedAccounts.instagram ||
                     !effectiveCaption ||
                     checkedClipIds.length === 0
@@ -1418,6 +1514,7 @@ export default function PublishPage() {
                       onClick={handlePublish}
                       disabled={
                         isPublishing ||
+                        cloudinarySyncing ||
                         !selectedClipId ||
                         (selectedPlatform === "youtube" && !publishTitle.trim()) ||
                         (selectedPlatform === "instagram" && !effectiveCaption) ||

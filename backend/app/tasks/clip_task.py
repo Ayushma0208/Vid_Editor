@@ -339,7 +339,6 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
     saved_thumb_path = str(clips_dir / f"{clip_id}_thumb.jpg")
 
     ffmpeg_service = FfmpegService()
-    cloudinary_service = CloudinaryService()
     append_ad = _should_append_ad()
 
     try:
@@ -376,21 +375,14 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
             clip.interest_motion = None
 
         try:
-            clip_upload = await cloudinary_service.upload_video(
-                file_path=upload_path,
-                folder=f"projects/{project_id}/clips/{clip_id}",
+            await _upload_clip_to_cloudinary(
+                clip,
+                video_path=saved_clip_path,
+                thumb_path=saved_thumb_path,
             )
-            thumb_upload = await cloudinary_service.upload_image(
-                file_path=thumbnail_output_path,
-                folder=f"projects/{project_id}/clips/{clip_id}_thumb",
-            )
-            clip.cloudinary_clip_url = clip_upload.get("secure_url") or clip_upload.get("url")
-            clip.cloudinary_public_id = clip_upload.get("public_id")
-            clip.thumbnail_url = thumb_upload.get("secure_url") or thumb_upload.get("url")
         except Exception:
-            # Keep local files — Cloudinary is required for durable playback on ephemeral hosts.
             logger.exception(
-                "Cloudinary clip upload failed project=%s clip=%s — playback may break after temp wipe",
+                "Cloudinary clip upload failed project=%s clip=%s — Instagram publish needs a retry",
                 project_id,
                 clip_id,
             )
@@ -533,6 +525,172 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
     }
 
 
+CLOUDINARY_SYNC_KEY = "cloudinary_clip_sync"
+
+
+def _cloudinary_configured() -> bool:
+    return CloudinaryService().is_configured()
+
+
+async def _set_cloudinary_sync_meta(project_id: str, patch: dict[str, Any]) -> None:
+    project = await Project.get(PydanticObjectId(project_id))
+    if not project:
+        return
+    meta = dict(project.metadata or {})
+    current = dict(meta.get(CLOUDINARY_SYNC_KEY) or {})
+    current.update(patch)
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+    meta[CLOUDINARY_SYNC_KEY] = current
+    project.metadata = meta
+    project.updated_at = datetime.now(timezone.utc)
+    await project.save()
+
+
+async def _upload_clip_to_cloudinary(
+    clip: Clip,
+    video_path: str,
+    thumb_path: str | None = None,
+) -> Clip:
+    if not _cloudinary_configured():
+        raise RuntimeError("Cloudinary is not configured")
+    if not Path(video_path).is_file():
+        raise FileNotFoundError(f"Clip file not found: {video_path}")
+
+    service = CloudinaryService()
+    last_error: Exception | None = None
+    clip_id = str(clip.id)
+    for attempt in range(1, 4):
+        try:
+            clip_upload = await service.upload_video(
+                file_path=video_path,
+                folder=f"projects/{clip.project_id}/clips/{clip_id}",
+            )
+            url = clip_upload.get("secure_url") or clip_upload.get("url")
+            if not url:
+                raise RuntimeError("Cloudinary did not return a video URL")
+            clip.cloudinary_clip_url = url
+            clip.cloudinary_public_id = clip_upload.get("public_id")
+            if thumb_path and Path(thumb_path).is_file():
+                try:
+                    thumb_upload = await service.upload_image(
+                        file_path=thumb_path,
+                        folder=f"projects/{clip.project_id}/clips/{clip_id}_thumb",
+                    )
+                    clip.thumbnail_url = thumb_upload.get("secure_url") or thumb_upload.get("url")
+                except Exception:
+                    logger.exception("Cloudinary thumbnail upload failed clip=%s", clip_id)
+            await clip.save()
+            return clip
+        except Exception as exc:
+            last_error = exc
+            logger.exception("Cloudinary clip upload attempt %s failed clip=%s", attempt, clip_id)
+            if attempt < 3:
+                await asyncio.sleep(2 * attempt)
+    raise RuntimeError(f"Cloudinary clip upload failed after retries: {last_error}") from last_error
+
+
+async def ensure_clip_on_cloudinary(project_id: str, clip_id: str) -> Clip:
+    clip = await Clip.get(PydanticObjectId(clip_id))
+    if not clip or clip.project_id != project_id:
+        raise RuntimeError("Clip not found")
+    if clip.cloudinary_clip_url:
+        return clip
+
+    local_path = Path(clip.local_clip_path) if clip.local_clip_path else None
+    if local_path and local_path.is_file():
+        return await _upload_clip_to_cloudinary(
+            clip,
+            video_path=str(local_path),
+            thumb_path=clip.local_thumbnail_path,
+        )
+
+    await run_clip_processing(project_id, clip_id)
+    refreshed = await Clip.get(PydanticObjectId(clip_id))
+    if not refreshed or not refreshed.cloudinary_clip_url:
+        raise RuntimeError("Clip was rebuilt but Cloudinary upload still failed")
+    return refreshed
+
+
+async def upload_missing_project_clips_to_cloudinary(project_id: str) -> dict[str, Any]:
+    project = await Project.get(PydanticObjectId(project_id))
+    if not project:
+        raise RuntimeError("Project not found")
+    if not _cloudinary_configured():
+        raise RuntimeError("Cloudinary is not configured")
+
+    clips = await Clip.find(Clip.project_id == project_id, Clip.user_id == project.user_id).sort("+start_time").to_list()
+    missing = [c for c in clips if not c.cloudinary_clip_url]
+    await _set_cloudinary_sync_meta(
+        project_id,
+        {
+            "status": "running",
+            "total": len(clips),
+            "missing": len(missing),
+            "uploaded": 0,
+            "failed": 0,
+            "error": None,
+        },
+    )
+
+    uploaded = 0
+    failed = 0
+    last_error = None
+    from app.services.pipeline_runtime import set_processing_step
+
+    for index, clip in enumerate(missing, start=1):
+        await set_processing_step(project_id, f"Uploading clip {index} of {len(missing)} to Cloudinary…")
+        try:
+            await ensure_clip_on_cloudinary(project_id, str(clip.id))
+            uploaded += 1
+        except Exception as exc:
+            failed += 1
+            last_error = str(exc)
+            logger.exception("Failed uploading clip %s to Cloudinary", clip.id)
+        await _set_cloudinary_sync_meta(
+            project_id,
+            {
+                "status": "running",
+                "uploaded": uploaded,
+                "failed": failed,
+                "missing": max(0, len(missing) - uploaded - failed),
+            },
+        )
+
+    status_value = "done" if failed == 0 else "error"
+    await _set_cloudinary_sync_meta(
+        project_id,
+        {
+            "status": status_value,
+            "uploaded": uploaded,
+            "failed": failed,
+            "missing": failed,
+            "error": last_error if failed else None,
+        },
+    )
+    try:
+        await set_processing_step(project_id, "Cloudinary clip upload complete.")
+    except Exception:
+        pass
+    return {
+        "project_id": project_id,
+        "total": len(clips),
+        "uploaded": uploaded,
+        "failed": failed,
+        "status": status_value,
+    }
+
+
+async def trigger_upload_project_clips_to_cloudinary(project_id: str) -> dict[str, Any]:
+    if await celery_workers_available():
+        try:
+            task = upload_project_clips_to_cloudinary_task.delay(project_id)
+            return {"task_id": task.id, "execution_mode": "celery"}
+        except Exception:
+            logger.exception("Failed to enqueue Cloudinary clip upload for %s", project_id)
+    asyncio.create_task(upload_missing_project_clips_to_cloudinary(project_id))
+    return {"task_id": None, "execution_mode": "local-background"}
+
+
 @celery_app.task(name="create_clip_task")
 def create_clip_task(project_id: str, clip_id: str):
     loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
@@ -551,3 +709,9 @@ def create_clip_task(project_id: str, clip_id: str):
 def auto_generate_clips_task(project_id: str, clip_duration: int | None = None):
     loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
     return loop.run_until_complete(auto_generate_project_clips(project_id, clip_duration))
+
+
+@celery_app.task(name="upload_project_clips_to_cloudinary_task")
+def upload_project_clips_to_cloudinary_task(project_id: str):
+    loop = cw.worker_loop if cw.worker_loop is not None else asyncio.get_event_loop()
+    return loop.run_until_complete(upload_missing_project_clips_to_cloudinary(project_id))

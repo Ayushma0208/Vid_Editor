@@ -36,7 +36,7 @@ def _oauth_redirect_uri(request: Request, route_name: str) -> str:
     if route_name == "instagram_oauth_callback":
         configured = (settings.instagram_redirect_uri or "").strip()
         if configured:
-            return configured.rstrip("/")
+            return configured
 
     uri = str(request.url_for(route_name))
     parsed = urlparse(uri)
@@ -234,10 +234,20 @@ async def publish_clip_to_instagram(
     if not clip or clip.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
     if not clip.cloudinary_clip_url:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Clip Cloudinary URL is missing. Instagram requires a public video URL.",
-        )
+        from app.tasks.clip_task import ensure_clip_on_cloudinary
+
+        try:
+            clip = await ensure_clip_on_cloudinary(clip.project_id, clip_id)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Could not upload this clip to Cloudinary: {exc}",
+            ) from exc
+        if not clip.cloudinary_clip_url:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Clip Cloudinary URL is missing. Instagram requires a public video URL.",
+            )
 
     payload = body or PublishBody()
     title = payload.title.strip()
@@ -296,7 +306,7 @@ async def publish_all_project_clips_to_instagram(
     if not publishable:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No ready clips with Cloudinary URLs available to publish",
+            detail="No ready clips with Cloudinary URLs. Wait for clip upload to Cloudinary to finish.",
         )
 
     payload = body or PublishBody()
