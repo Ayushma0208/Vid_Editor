@@ -187,8 +187,18 @@ async def _run_upload_pipeline(
     try:
         await _backup_source_to_cloudinary(project, source_paths[0])
         project = await Project.get(PydanticObjectId(project_id)) or project
-    except Exception:
+    except Exception as exc:
         logger.exception("Early Cloudinary backup failed for project %s", project_id)
+        message = str(exc)
+        if "cloud_name is disabled" in message.lower():
+            raise RuntimeError(
+                "Cloudinary cloud is disabled. Open cloudinary.com, reactivate or create a new cloud, "
+                "then update CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET, and "
+                "CLOUDINARY_URL on Render and re-upload the video."
+            ) from exc
+        raise RuntimeError(
+            f"Cloudinary backup failed ({message}). Instagram publish needs a working Cloudinary account."
+        ) from exc
 
     if not ffmpeg_available():
         raise RuntimeError(ffmpeg_missing_message())
