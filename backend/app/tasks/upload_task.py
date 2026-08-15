@@ -46,28 +46,42 @@ async def _backup_source_to_cloudinary(project: Project, source_path: Path) -> N
         logger.warning("Cloudinary is not configured; upload %s has no durable backup", project.id)
         return
 
-    upload_path = source_path
-    compressed_path: Path | None = None
-    try:
-        if source_path.stat().st_size > _CLOUDINARY_SAFE_VIDEO_BYTES and ffmpeg_available():
-            compressed_path = source_path.with_name(f"{source_path.stem}.cloudinary-backup.mp4")
-            ffmpeg_service = FfmpegService()
-            await ffmpeg_service.compress_under_bytes(
-                str(source_path),
-                str(compressed_path),
-                _CLOUDINARY_SAFE_VIDEO_BYTES,
-            )
-            upload_path = compressed_path
-
+    async def _upload(path: Path) -> None:
         raw_upload = await cloudinary.upload_video(
-            str(upload_path),
+            str(path),
             folder=f"projects/{project.id}/raw",
         )
         project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
         project.cloudinary_folder = f"projects/{project.id}/"
         await project.save()
+
+    try:
+        await _upload(source_path)
+        return
+    except Exception as exc:
+        if not _is_cloudinary_size_limit(str(exc)):
+            raise
+        logger.warning(
+            "Cloudinary rejected %s (%s bytes); compressing a backup under 100MB",
+            source_path.name,
+            source_path.stat().st_size,
+        )
+        size_error = exc
+
+    if not ffmpeg_available():
+        raise size_error
+
+    compressed_path = source_path.with_name(f"{source_path.stem}.cloudinary-backup.mp4")
+    try:
+        ffmpeg_service = FfmpegService()
+        await ffmpeg_service.compress_under_bytes(
+            str(source_path),
+            str(compressed_path),
+            _CLOUDINARY_SAFE_VIDEO_BYTES,
+        )
+        await _upload(compressed_path)
     finally:
-        if compressed_path and compressed_path.exists() and compressed_path != source_path:
+        if compressed_path.exists() and compressed_path != source_path:
             compressed_path.unlink(missing_ok=True)
 
 
@@ -84,6 +98,42 @@ def staging_upload_path(user_id: str, original_filename: str) -> Path:
     upload_dir = Path(settings.temp_dir) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     return upload_dir / f"{user_id}-{safe_name}{ext}"
+
+
+def find_upload_source(project: Project) -> Path | None:
+    """Locate a staged upload even if the filename convention changed or the process restarted."""
+    metadata = project.metadata or {}
+    candidates: list[Path] = []
+
+    for raw in metadata.get("upload_local_paths") or []:
+        candidates.append(Path(str(raw)))
+    if project.local_video_path:
+        candidates.append(Path(str(project.local_video_path)))
+
+    original_filename = metadata.get("original_filename")
+    if original_filename:
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(str(original_filename)).stem).strip("-") or "video"
+        ext = Path(str(original_filename)).suffix.lower() or ".mp4"
+        candidates.append(staging_upload_path(project.user_id, str(original_filename)))
+        upload_dir = Path(settings.temp_dir) / "uploads"
+        if upload_dir.is_dir():
+            candidates.extend(upload_dir.glob(f"{project.user_id}-*-{safe_name}{ext}"))
+            candidates.extend(upload_dir.glob(f"{project.user_id}-{safe_name}{ext}"))
+            candidates.extend(upload_dir.glob(f"{project.user_id}-*{safe_name}*"))
+
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            continue
+        if resolved in seen or not path.is_file():
+            continue
+        if path.name.endswith(".cloudinary-backup.mp4"):
+            continue
+        seen.add(resolved)
+        return path
+    return None
 
 
 async def _generate_thumbnail(video_path: Path, output_path: Path) -> bool:
@@ -537,10 +587,7 @@ async def retry_upload_processing(project: Project, background_tasks: Background
         return
 
     metadata = dict(project.metadata or {})
-    original_filename = metadata.get("original_filename")
-    source_path = staging_upload_path(project.user_id, str(original_filename)) if original_filename else None
-    if (source_path is None or not source_path.is_file()) and project.local_video_path:
-        source_path = Path(project.local_video_path)
+    source_path = find_upload_source(project)
 
     if source_path is not None and source_path.is_file():
         project.status = ProjectStatus.PENDING

@@ -6,7 +6,6 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from beanie import PydanticObjectId
 
@@ -71,17 +70,9 @@ async def set_processing_step(project_id: str, step: str) -> None:
 
 
 def _local_upload_source_exists(project) -> bool:
-    from app.tasks.upload_task import staging_upload_path
+    from app.tasks.upload_task import find_upload_source
 
-    metadata = project.metadata or {}
-    original_filename = metadata.get("original_filename")
-    if original_filename:
-        staged = staging_upload_path(project.user_id, str(original_filename))
-        if staged.is_file():
-            return True
-    if project.local_video_path and Path(str(project.local_video_path)).is_file():
-        return True
-    return False
+    return find_upload_source(project) is not None
 
 
 async def fail_dead_upload_if_source_missing(project):
@@ -210,19 +201,11 @@ async def _resume_upload(project) -> None:
     from app.tasks.clip_task import start_local_clip_generation
     from app.tasks.upload_task import (
         _run_upload_pipeline,
+        find_upload_source,
         restore_upload_source_from_cloudinary,
-        staging_upload_path,
     )
 
-    metadata = project.metadata or {}
-    original_filename = metadata.get("original_filename")
-    candidates: list[Path] = []
-    if original_filename:
-        candidates.append(staging_upload_path(project.user_id, str(original_filename)))
-    if project.local_video_path:
-        candidates.append(Path(project.local_video_path))
-
-    source = next((path for path in candidates if path.is_file()), None)
+    source = find_upload_source(project)
     if source:
         await _run_upload_pipeline(str(project.id), source)
         return

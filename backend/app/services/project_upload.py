@@ -136,6 +136,7 @@ async def create_project_from_upload(
             "original_filenames": filenames,
             "upload_size_bytes": total,
             "upload_file_count": len(saved_paths),
+            "upload_local_paths": [str(path) for path in saved_paths],
         },
         created_at=now,
         updated_at=now,

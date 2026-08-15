@@ -154,10 +154,13 @@ def ffmpeg_missing_message() -> str:
 
 
 def is_ffmpeg_missing_error(exc: Exception) -> bool:
-    if isinstance(exc, FileNotFoundError):
-        return True
     message = str(exc).lower()
-    return "cannot find the file" in message or "winerror 2" in message or "ffmpeg" in message
+    if "no longer on the server" in message or "upload the video again" in message:
+        return False
+    if "ffmpeg" in message or "ffprobe" in message:
+        return True
+    filename = str(getattr(exc, "filename", "") or "").lower()
+    return "ffmpeg" in filename or "ffprobe" in filename
 
 
 def ffmpeg_available() -> bool:

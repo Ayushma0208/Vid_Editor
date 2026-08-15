@@ -581,23 +581,28 @@ export default function ProjectClipsPage() {
   // Hide misleading yt-dlp errors on manual uploads (upload:// scheme).
   const cleanedError =
     isUpload && /unsupported url scheme.*upload|yt-dlp/i.test(rawError) ? "" : rawError
+  const missingSourceMessage = /no longer on the server|upload the video again/i.test(cleanedError || "")
+  const ffmpegFalseAlarm =
+    isUpload && /ffmpeg\/ffprobe is not installed/i.test(cleanedError || "")
   const processingError =
-    cleanedError ||
-    rawWarning ||
-    (projectStatus === "error"
-      ? isUpload
-        ? "Upload processing failed. Re-upload the video from the dashboard."
-        : "Video processing failed. Install FFmpeg, restart the backend, then click Retry processing."
-      : null)
+    missingSourceMessage || ffmpegFalseAlarm
+      ? null
+      : cleanedError ||
+        rawWarning ||
+        (projectStatus === "error"
+          ? isUpload
+            ? "Upload processing failed. Re-upload the video from the dashboard."
+            : "Video processing failed. Install FFmpeg, restart the backend, then click Retry processing."
+          : null)
   const canGenerate = projectStatus === "ready" && !isProcessingUpload
   const sourceMissing = project.source_file_available === false
   const needsRefetch = !isUpload && !isProcessingUpload && sourceMissing && readyCount > 0 && !!project.yt_url
-  const missingSourceMessage = /no longer on the server|upload the video again/i.test(cleanedError || "")
   const needsReupload =
     isUpload &&
     !pipelineRunning &&
     (project.needs_reupload === true ||
       missingSourceMessage ||
+      ffmpegFalseAlarm ||
       (sourceMissing && !project.has_cloudinary_raw && !project.cloudinary_raw_url && !isProcessingUpload))
   const canRestoreUpload =
     isUpload &&

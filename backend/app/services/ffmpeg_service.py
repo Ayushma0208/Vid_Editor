@@ -157,12 +157,14 @@ class FfmpegService:
         for bitrate_k, scale in attempts:
             args = [
                 "-y",
+                "-threads",
+                "1",
                 "-i",
                 input_path,
                 "-c:v",
                 "libx264",
                 "-preset",
-                "veryfast",
+                "ultrafast",
                 "-b:v",
                 f"{bitrate_k}k",
                 "-maxrate",
