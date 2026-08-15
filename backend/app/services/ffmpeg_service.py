@@ -137,6 +137,66 @@ class FfmpegService:
         )
         return output_path
 
+    async def compress_under_bytes(self, input_path: str, output_path: str, max_bytes: int) -> str:
+        """Re-encode so the file fits Cloudinary's typical 100MB video cap."""
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        duration = await self.probe_duration(input_path) or 0
+        audio_bps = 96_000
+        if duration > 1:
+            video_bps = int((max_bytes * 8 * 0.82) / duration) - audio_bps
+            video_k = max(250, video_bps // 1000)
+        else:
+            video_k = 800
+
+        attempts: list[tuple[int, str | None]] = [
+            (video_k, None),
+            (max(250, video_k * 2 // 3), "scale=-2:720"),
+            (max(200, video_k // 2), "scale=-2:480"),
+        ]
+        last_error: Exception | None = None
+        for bitrate_k, scale in attempts:
+            args = [
+                "-y",
+                "-i",
+                input_path,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-b:v",
+                f"{bitrate_k}k",
+                "-maxrate",
+                f"{bitrate_k}k",
+                "-bufsize",
+                f"{bitrate_k * 2}k",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-ac",
+                "2",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ]
+            if scale:
+                args.extend(["-vf", scale])
+            args.append(output_path)
+            try:
+                await self._run_ffmpeg(*args)
+            except Exception as exc:
+                last_error = exc
+                continue
+            if Path(output_path).is_file() and Path(output_path).stat().st_size <= max_bytes:
+                return output_path
+
+        size = Path(output_path).stat().st_size if Path(output_path).is_file() else 0
+        raise RuntimeError(
+            f"Could not compress video under {max_bytes} bytes (got {size})"
+            + (f": {last_error}" if last_error else "")
+        )
+
     async def cut_clip(
         self,
         input_path: str,

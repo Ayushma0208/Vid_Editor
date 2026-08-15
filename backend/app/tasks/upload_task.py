@@ -27,6 +27,15 @@ from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, for
 
 logger = logging.getLogger(__name__)
 
+# Cloudinary Free/Plus reject videos over 100MB even with chunked upload_large.
+_CLOUDINARY_MAX_VIDEO_BYTES = 100 * 1024 * 1024
+_CLOUDINARY_SAFE_VIDEO_BYTES = 95 * 1024 * 1024
+
+
+def _is_cloudinary_size_limit(message: str) -> bool:
+    text = (message or "").lower()
+    return "file size too large" in text or "104857600" in text
+
 
 async def _backup_source_to_cloudinary(project: Project, source_path: Path) -> None:
     """Persist the original upload before FFmpeg/temp wipe so retries can restore it."""
@@ -36,13 +45,30 @@ async def _backup_source_to_cloudinary(project: Project, source_path: Path) -> N
     if not cloudinary.is_configured():
         logger.warning("Cloudinary is not configured; upload %s has no durable backup", project.id)
         return
-    raw_upload = await cloudinary.upload_video(
-        str(source_path),
-        folder=f"projects/{project.id}/raw",
-    )
-    project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
-    project.cloudinary_folder = f"projects/{project.id}/"
-    await project.save()
+
+    upload_path = source_path
+    compressed_path: Path | None = None
+    try:
+        if source_path.stat().st_size > _CLOUDINARY_SAFE_VIDEO_BYTES and ffmpeg_available():
+            compressed_path = source_path.with_name(f"{source_path.stem}.cloudinary-backup.mp4")
+            ffmpeg_service = FfmpegService()
+            await ffmpeg_service.compress_under_bytes(
+                str(source_path),
+                str(compressed_path),
+                _CLOUDINARY_SAFE_VIDEO_BYTES,
+            )
+            upload_path = compressed_path
+
+        raw_upload = await cloudinary.upload_video(
+            str(upload_path),
+            folder=f"projects/{project.id}/raw",
+        )
+        project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
+        project.cloudinary_folder = f"projects/{project.id}/"
+        await project.save()
+    finally:
+        if compressed_path and compressed_path.exists() and compressed_path != source_path:
+            compressed_path.unlink(missing_ok=True)
 
 
 def is_upload_project(project: Project) -> bool:
@@ -196,9 +222,17 @@ async def _run_upload_pipeline(
                 "then update CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET, and "
                 "CLOUDINARY_URL on Render and re-upload the video."
             ) from exc
-        raise RuntimeError(
-            f"Cloudinary backup failed ({message}). Instagram publish needs a working Cloudinary account."
-        ) from exc
+        if _is_cloudinary_size_limit(message):
+            logger.warning(
+                "Cloudinary rejected the %s source backup as over 100MB; continuing local processing",
+                project_id,
+            )
+        else:
+            logger.warning(
+                "Continuing without a Cloudinary source backup for %s: %s",
+                project_id,
+                message,
+            )
 
     if not ffmpeg_available():
         raise RuntimeError(ffmpeg_missing_message())
@@ -270,14 +304,10 @@ async def _run_upload_pipeline(
     await set_processing_step(project_id, "Saving a backup of the video…")
     # Persist source + thumbnail to Cloudinary so Render temp clears don't kill playback.
     cloudinary = CloudinaryService()
+    backup_src = Path(dest_path) if Path(dest_path).is_file() else Path(project.local_video_path or "")
     try:
-        raw_upload = await cloudinary.upload_video(
-            str(dest_path if Path(dest_path).is_file() else project.local_video_path),
-            folder=f"projects/{project_id}/raw",
-        )
-        project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
-        project.cloudinary_folder = f"projects/{project_id}/"
-        await project.save()
+        await _backup_source_to_cloudinary(project, backup_src)
+        project = await Project.get(PydanticObjectId(project_id)) or project
     except Exception:
         logger.exception("Cloudinary raw upload failed for project %s", project_id)
 
