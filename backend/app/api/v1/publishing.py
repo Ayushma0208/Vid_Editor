@@ -33,14 +33,24 @@ router = APIRouter(tags=["publishing"])
 
 
 def _oauth_redirect_uri(request: Request, route_name: str) -> str:
+    if route_name == "instagram_oauth_callback":
+        configured = (settings.instagram_redirect_uri or "").strip()
+        if configured:
+            return configured.rstrip("/")
+
     uri = str(request.url_for(route_name))
     parsed = urlparse(uri)
     host = parsed.hostname or "localhost"
     if host in {"127.0.0.1", "0.0.0.0"}:
         host = "localhost"
+    scheme = parsed.scheme
+    if host not in {"localhost", "127.0.0.1"}:
+        scheme = "https"
     port = parsed.port
+    if port in {80, 443}:
+        port = None
     netloc = f"{host}:{port}" if port else host
-    return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
+    return urlunparse((scheme, netloc, parsed.path, "", "", ""))
 
 
 def _oauth_result_page(platform: str, ok: bool, message: str = "") -> HTMLResponse:

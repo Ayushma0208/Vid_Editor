@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     youtube_api_key: str = ""
     instagram_app_id: str = ""
     instagram_app_secret: str = ""
+    instagram_redirect_uri: str = ""
     redis_url: str = ""
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
