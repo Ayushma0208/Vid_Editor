@@ -28,6 +28,23 @@ from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, for
 logger = logging.getLogger(__name__)
 
 
+async def _backup_source_to_cloudinary(project: Project, source_path: Path) -> None:
+    """Persist the original upload before FFmpeg/temp wipe so retries can restore it."""
+    if project.cloudinary_raw_url or not source_path.is_file():
+        return
+    cloudinary = CloudinaryService()
+    if not cloudinary.is_configured():
+        logger.warning("Cloudinary is not configured; upload %s has no durable backup", project.id)
+        return
+    raw_upload = await cloudinary.upload_video(
+        str(source_path),
+        folder=f"projects/{project.id}/raw",
+    )
+    project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
+    project.cloudinary_folder = f"projects/{project.id}/"
+    await project.save()
+
+
 def is_upload_project(project: Project) -> bool:
     meta = project.metadata or {}
     if meta.get("source") == "upload":
@@ -163,12 +180,18 @@ async def _run_upload_pipeline(
     if not source_paths:
         raise FileNotFoundError(f"Uploaded video file not found: {source_path}")
 
-    if not ffmpeg_available():
-        raise RuntimeError(ffmpeg_missing_message())
-
     project = await Project.get(PydanticObjectId(project_id))
     if not project:
         raise ValueError("Project not found")
+
+    try:
+        await _backup_source_to_cloudinary(project, source_paths[0])
+        project = await Project.get(PydanticObjectId(project_id)) or project
+    except Exception:
+        logger.exception("Early Cloudinary backup failed for project %s", project_id)
+
+    if not ffmpeg_available():
+        raise RuntimeError(ffmpeg_missing_message())
 
     project.status = ProjectStatus.DOWNLOADING
     project.updated_at = datetime.now(timezone.utc)
