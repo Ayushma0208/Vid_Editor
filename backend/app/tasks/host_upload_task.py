@@ -12,7 +12,9 @@ import app.celery_worker as cw
 from app.config import settings
 from app.models.clip import Clip
 from app.services.cloudinary_service import CloudinaryService
+from app.services.pipeline_runtime import spawn_background
 from app.services.ppd_routing import HOST_KEYS, get_host_service
+from app.utils.celery_utils import celery_workers_available
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -84,6 +86,26 @@ async def _distribute_clip(clip_id: str, user_id: str, hosts: list[str]) -> dict
     local_path = await _ensure_local_clip(clip)
     results = await asyncio.gather(*[_upload_one(clip_id, host, local_path) for host in selected])
     return {"clip_id": clip_id, "results": list(results)}
+
+
+async def trigger_host_upload(clip_id: str, user_id: str, hosts: list[str]) -> dict:
+    if await celery_workers_available():
+        try:
+            task = host_upload_task.delay(clip_id, user_id, hosts)
+            return {"task_id": task.id, "execution_mode": "celery"}
+        except Exception:
+            pass
+
+    async def _local() -> None:
+        try:
+            await _distribute_clip(clip_id, user_id, hosts)
+        except Exception as exc:
+            for host in hosts:
+                if host in HOST_KEYS:
+                    await _set_host_state(clip_id, host, {"status": "error", "error": str(exc)})
+
+    spawn_background(_local())
+    return {"task_id": "local-background", "execution_mode": "local-background"}
 
 
 @celery_app.task(bind=True, name="host_upload_task")

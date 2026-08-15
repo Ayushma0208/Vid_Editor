@@ -83,7 +83,7 @@ export default function DashboardPage() {
   const [projects, setProjects] = useState<ProjectItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isModalOpen, setIsModalOpen] = useState(false)
-  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploadFiles, setUploadFiles] = useState<File[]>([])
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isCreating, setIsCreating] = useState(false)
   const [youtubeUrl, setYoutubeUrl] = useState("")
@@ -133,26 +133,28 @@ export default function DashboardPage() {
 
   const handleUploadProject = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!uploadFile) return
+    if (uploadFiles.length === 0) return
     const isVercelHost = typeof window !== "undefined" && window.location.hostname.endsWith(".vercel.app")
     const apiBase = process.env.NEXT_PUBLIC_API_URL || ""
     const apiTargetsRender = /onrender\.com/i.test(apiBase)
     const VERCEL_SAFE_UPLOAD_BYTES = 4 * 1024 * 1024
-    if (isVercelHost && !apiTargetsRender && uploadFile.size > VERCEL_SAFE_UPLOAD_BYTES) {
+    if (isVercelHost && !apiTargetsRender && uploadFiles.some((file) => file.size > VERCEL_SAFE_UPLOAD_BYTES)) {
       setError("This file is too large for Vercel upload requests. Use the YouTube URL option below, or deploy backend on a VM/Render/Railway for large local uploads.")
       return
     }
     setIsCreating(true); setError(null); setUploadProgress(0)
     try {
       const formData = new FormData()
-      formData.append("file", uploadFile)
+      for (const file of uploadFiles) {
+        formData.append("files", file)
+      }
       const response = await api.post("/api/v1/uploads", formData, {
         timeout: 0,
         onUploadProgress: (e) => {
           if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total))
         },
       })
-      setUploadFile(null)
+      setUploadFiles([])
       setUploadProgress(0)
       setIsModalOpen(false)
       const createdId = response.data?.id as string | undefined
@@ -162,14 +164,15 @@ export default function DashboardPage() {
       }
       await loadProjects()
     } catch (err: unknown) {
-      const res = (err as { response?: { status?: number; data?: { detail?: string } } })?.response
+      const res = (err as { response?: { status?: number; data?: { detail?: unknown } } })?.response
       const apiError = res?.data?.detail
+      const message = typeof apiError === "string" ? apiError : ""
       if (res?.status === 405) {
         setError("Upload API not available. Restart the backend server and try again.")
       } else if (res?.status === 413) {
         setError("Upload failed: payload too large for Vercel. Use YouTube URL import or smaller file.")
       } else {
-        setError(typeof apiError === "string" ? apiError : "Could not upload video. Is the backend running?")
+        setError(message.trim() || "Could not upload video. Is the backend running?")
       }
     } finally { setIsCreating(false) }
   }
@@ -183,7 +186,7 @@ export default function DashboardPage() {
     try {
       await api.post("/api/v1/projects/", { yt_url: trimmed })
       setYoutubeUrl("")
-      setUploadFile(null)
+      setUploadFiles([])
       setUploadProgress(0)
       setIsModalOpen(false)
       await loadProjects()
@@ -626,7 +629,7 @@ export default function DashboardPage() {
             <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
               <div>
                 <h2 className="text-base font-bold text-white">Upload Movie</h2>
-                <p className="mt-0.5 text-xs text-[#5a5d72]">Upload a video (MP4, MOV, WebM, MKV) or paste a YouTube URL.</p>
+                <p className="mt-0.5 text-xs text-[#5a5d72]">Add 240p, 480p, 720p, and 1080p files together. Each is auto-sorted and sent to its host.</p>
               </div>
               <button onClick={() => setIsModalOpen(false)} className="flex h-7 w-7 items-center justify-center rounded-lg text-[#4a4d60] hover:bg-white/[0.06] hover:text-[#c8cad8] transition-all">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -639,22 +642,34 @@ export default function DashboardPage() {
               {error && <p className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</p>}
 
               <div>
-                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-[#4a4d60]">Video file</label>
+                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-[#4a4d60]">Video files</label>
                 <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-white/[0.12] bg-white/[0.04] px-4 py-8 transition-colors hover:border-[#5b6ef5]/50">
                   <svg className="h-8 w-8 text-[#7c8df8]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                   </svg>
                   <span className="text-sm font-medium text-[#c8cad8]">
-                    {uploadFile ? uploadFile.name : "Choose MP4, MOV, or MKV (up to 5 GB)"}
+                    {uploadFiles.length > 0
+                      ? `${uploadFiles.length} file${uploadFiles.length === 1 ? "" : "s"} selected`
+                      : "Choose 240p / 480p / 720p / 1080p files"}
                   </span>
-                  <span className="text-xs text-[#5a5d72]">1–2 hour movies supported</span>
+                  <span className="text-xs text-[#5a5d72]">Select all quality versions at once (MP4, MOV, MKV)</span>
                   <input
                     type="file"
+                    multiple
                     accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.mkv,.webm"
                     className="hidden"
-                    onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                    onChange={(e) => setUploadFiles(Array.from(e.target.files || []))}
                   />
                 </label>
+                {uploadFiles.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {uploadFiles.map((file) => (
+                      <li key={`${file.name}-${file.size}`} className="truncate text-[11px] text-[#8b8ea3]">
+                        {file.name}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {isCreating && uploadProgress > 0 && (
                   <div className="mt-3">
                     <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
@@ -666,13 +681,13 @@ export default function DashboardPage() {
               </div>
 
               <div className="flex items-center gap-3 pt-1">
-                <button type="button" onClick={() => { setIsModalOpen(false); setError(null); setUploadFile(null) }}
+                <button type="button" onClick={() => { setIsModalOpen(false); setError(null); setUploadFiles([]) }}
                   className="flex-1 rounded-xl border border-white/[0.07] py-2.5 text-sm font-medium text-[#6b6e84] hover:bg-white/[0.04] hover:text-[#c8cad8] transition-all">
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isCreating || !uploadFile}
+                  disabled={isCreating || uploadFiles.length === 0}
                   className="flex-1 rounded-xl bg-gradient-to-r from-[#5b6ef5] to-[#8b5cf6] py-2.5 text-sm font-semibold text-white shadow-lg shadow-[#5b6ef5]/20 hover:opacity-90 disabled:opacity-50 transition-all"
                 >
                   {isCreating ? "Uploading…" : "Upload & Cut Clips"}

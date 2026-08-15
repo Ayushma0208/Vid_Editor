@@ -395,11 +395,34 @@ export default function PublishPage() {
   ])
 
   useEffect(() => {
+    const hostBusy = qualityRows.some((row) => (row.host_status || "").toLowerCase() === "uploading")
+    if (!hostBusy) return
+    const interval = setInterval(() => {
+      void loadQualities()
+    }, 4000)
+    return () => clearInterval(interval)
+  }, [qualityRows, loadQualities])
+
+  useEffect(() => {
     const onFocus = () => {
       loadAuthStatus()
     }
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data
+      if (!data || data.type !== "oauth-complete") return
+      loadAuthStatus()
+      if (data.status === "connected") {
+        showToast(`${String(data.platform || "Account")} connected.`, "success")
+      } else {
+        showToast(String(data.message || "Could not connect account."), "error")
+      }
+    }
     window.addEventListener("focus", onFocus)
-    return () => window.removeEventListener("focus", onFocus)
+    window.addEventListener("message", onMessage)
+    return () => {
+      window.removeEventListener("focus", onFocus)
+      window.removeEventListener("message", onMessage)
+    }
   }, [loadAuthStatus])
 
   useEffect(() => {
@@ -898,8 +921,8 @@ export default function PublishPage() {
             <div className="mb-6">
               <h1 className="text-2xl font-bold">Publish Clips</h1>
               <p className="mt-1 text-sm text-[#434655]">
-                Full movies go to file hosts by quality (240/480/720/1080). Popular clips are cut from
-                720p only and published to Instagram or YouTube.
+                Full movies are sorted by quality at upload (240/480/720/1080) and sent to hosts
+                automatically. Popular clips are cut from 720p and published to Instagram or YouTube.
               </p>
             </div>
 

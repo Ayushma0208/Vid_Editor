@@ -1,6 +1,10 @@
 from typing import Any, Literal
+from urllib.parse import urlparse, urlunparse
+from html import escape
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from celery.result import AsyncResult
 
@@ -21,11 +25,55 @@ from app.services.ppd_routing import (
     resolve_hosts_for_size,
 )
 from app.services.publish_service import PublishService
-from app.tasks.host_upload_task import host_upload_task
-from app.tasks.publish_task import publish_all_instagram_task, publish_clip_task
+from app.tasks.host_upload_task import trigger_host_upload
+from app.tasks.publish_task import trigger_publish_all_instagram, trigger_publish_clip
 
 
 router = APIRouter(tags=["publishing"])
+
+
+def _oauth_redirect_uri(request: Request, route_name: str) -> str:
+    uri = str(request.url_for(route_name))
+    parsed = urlparse(uri)
+    host = parsed.hostname or "localhost"
+    if host in {"127.0.0.1", "0.0.0.0"}:
+        host = "localhost"
+    port = parsed.port
+    netloc = f"{host}:{port}" if port else host
+    return urlunparse((parsed.scheme, netloc, parsed.path, "", "", ""))
+
+
+def _oauth_result_page(platform: str, ok: bool, message: str = "") -> HTMLResponse:
+    status_value = "connected" if ok else "error"
+    labels = {"youtube": "YouTube", "instagram": "Instagram"}
+    label = labels.get(platform, platform.title())
+    heading = f"{label} connected" if ok else f"{label} connection failed"
+    body = message.strip() or ("You can close this window." if ok else "Please close this window and try again.")
+    payload = json.dumps(
+        {
+            "type": "oauth-complete",
+            "platform": platform,
+            "status": status_value,
+            "message": body,
+        }
+    )
+    html = f"""<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>{escape(heading)}</title></head>
+  <body style="font-family: sans-serif; padding: 24px;">
+    <h1>{escape(heading)}</h1>
+    <p>{escape(body)}</p>
+    <script>
+      try {{
+        if (window.opener) {{
+          window.opener.postMessage({payload}, "*");
+        }}
+      }} catch (e) {{}}
+      window.close();
+    </script>
+  </body>
+</html>"""
+    return HTMLResponse(html)
 
 
 class PublishBody(BaseModel):
@@ -46,21 +94,30 @@ async def initiate_youtube_oauth(
     user_id: str = Depends(get_current_user_id),
 ):
     publish_service = PublishService()
-    redirect_uri = str(request.url_for("youtube_oauth_callback"))
-    auth_url = await publish_service.create_youtube_oauth_url(user_id=user_id, redirect_uri=redirect_uri)
+    redirect_uri = _oauth_redirect_uri(request, "youtube_oauth_callback")
+    try:
+        auth_url = await publish_service.create_youtube_oauth_url(user_id=user_id, redirect_uri=redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"platform": "youtube", "auth_url": auth_url}
 
 
 @router.get("/auth/youtube/callback", name="youtube_oauth_callback")
 async def youtube_oauth_callback(
-    code: str = Query(...),
-    state: str = Query(...),
+    code: str | None = Query(None),
+    state: str | None = Query(None),
+    error: str | None = Query(None),
+    error_description: str | None = Query(None),
 ):
+    if error:
+        return _oauth_result_page("youtube", False, error_description or error)
+    if not code or not state:
+        return _oauth_result_page("youtube", False, "Missing OAuth code or state")
     try:
-        result = await PublishService().complete_youtube_oauth(state=state, code=code)
+        await PublishService().complete_youtube_oauth(state=state, code=code)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return result
+        return _oauth_result_page("youtube", False, str(exc))
+    return _oauth_result_page("youtube", True)
 
 
 @router.post("/auth/instagram")
@@ -69,21 +126,31 @@ async def initiate_instagram_oauth(
     user_id: str = Depends(get_current_user_id),
 ):
     publish_service = PublishService()
-    redirect_uri = str(request.url_for("instagram_oauth_callback"))
-    auth_url = await publish_service.create_instagram_oauth_url(user_id=user_id, redirect_uri=redirect_uri)
+    redirect_uri = _oauth_redirect_uri(request, "instagram_oauth_callback")
+    try:
+        auth_url = await publish_service.create_instagram_oauth_url(user_id=user_id, redirect_uri=redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return {"platform": "instagram", "auth_url": auth_url}
 
 
 @router.get("/auth/instagram/callback", name="instagram_oauth_callback")
 async def instagram_oauth_callback(
-    code: str = Query(...),
-    state: str = Query(...),
+    code: str | None = Query(None),
+    state: str | None = Query(None),
+    error: str | None = Query(None),
+    error_description: str | None = Query(None),
+    error_message: str | None = Query(None),
 ):
+    if error:
+        return _oauth_result_page("instagram", False, error_description or error_message or error)
+    if not code or not state:
+        return _oauth_result_page("instagram", False, "Missing OAuth code or state")
     try:
-        result = await PublishService().complete_instagram_oauth(state=state, code=code)
+        await PublishService().complete_instagram_oauth(state=state, code=code)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return result
+        return _oauth_result_page("instagram", False, str(exc))
+    return _oauth_result_page("instagram", True)
 
 
 @router.get("/auth/status")
@@ -133,18 +200,18 @@ async def publish_clip_to_youtube(
         )
 
     payload = body or PublishBody()
-    task = publish_clip_task.delay(
+    queued = await trigger_publish_clip(
         "youtube",
         clip_id,
         user_id,
         payload.title,
         payload.description,
     )
-    clip.publish_task_id = task.id
+    clip.publish_task_id = queued["task_id"]
     clip.publish_platform = "youtube"
     clip.publish_status = "queued"
     await clip.save()
-    return {"task_id": task.id, "status": "queued"}
+    return {"task_id": queued["task_id"], "status": "queued", "execution_mode": queued["execution_mode"]}
 
 
 @router.post("/clips/{clip_id}/publish/instagram")
@@ -173,20 +240,21 @@ async def publish_clip_to_instagram(
     if not title:
         title = (clip.label or "").strip()
 
-    task = publish_clip_task.delay(
+    queued = await trigger_publish_clip(
         "instagram",
         clip_id,
         user_id,
         title,
         description,
     )
-    clip.publish_task_id = task.id
+    clip.publish_task_id = queued["task_id"]
     clip.publish_platform = "instagram"
     clip.publish_status = "queued"
     await clip.save()
     return {
-        "task_id": task.id,
+        "task_id": queued["task_id"],
         "status": "queued",
+        "execution_mode": queued["execution_mode"],
         "caption_preview": "\n\n".join([p for p in (title, description) if p])[:500],
     }
 
@@ -265,16 +333,17 @@ async def publish_all_project_clips_to_instagram(
         )
 
     clip_ids = [str(c.id) for c in selected]
-    task = publish_all_instagram_task.delay(project_id, user_id, title, description, clip_ids)
+    queued = await trigger_publish_all_instagram(project_id, user_id, title, description, clip_ids)
     for clip in selected:
-        clip.publish_task_id = task.id
+        clip.publish_task_id = queued["task_id"]
         clip.publish_platform = "instagram"
         clip.publish_status = "queued"
         await clip.save()
 
     return {
-        "task_id": task.id,
+        "task_id": queued["task_id"],
         "status": "queued",
+        "execution_mode": queued["execution_mode"],
         "clip_count": len(selected),
         "clip_ids": clip_ids,
         "selection_mode": selection_mode,
@@ -395,14 +464,14 @@ async def retry_failed_instagram_publishes(
     queued_ids: list[str] = []
     for clip in retryable:
         clip_id = str(clip.id)
-        task = publish_clip_task.delay(
+        queued = await trigger_publish_clip(
             "instagram",
             clip_id,
             user_id,
             (clip.label or title or ""),
             description,
         )
-        clip.publish_task_id = task.id
+        clip.publish_task_id = queued["task_id"]
         clip.publish_platform = "instagram"
         clip.publish_status = "queued"
         await clip.save()
@@ -425,20 +494,36 @@ async def get_publish_status(
     if not clip or clip.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
     if not clip.publish_task_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No publish task found")
+        if not clip.publish_status:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No publish task found")
+        return {
+            "task_id": None,
+            "platform": clip.publish_platform,
+            "state": clip.publish_status,
+            "result": None,
+            "publish_status": clip.publish_status,
+            "published_media_id": clip.published_media_id,
+            "published_url": clip.published_url,
+        }
 
-    task_result = AsyncResult(clip.publish_task_id, app=celery_app)
     result: Any = None
-    if task_result.ready():
+    task_state = clip.publish_status
+    if not str(clip.publish_task_id).startswith("local"):
         try:
-            result = task_result.result
-        except Exception as exc:
-            result = {"error": str(exc)}
+            task_result = AsyncResult(clip.publish_task_id, app=celery_app)
+            task_state = task_result.state
+            if task_result.ready():
+                try:
+                    result = task_result.result
+                except Exception as exc:
+                    result = {"error": str(exc)}
+        except Exception:
+            task_state = clip.publish_status
 
     return {
         "task_id": clip.publish_task_id,
         "platform": clip.publish_platform,
-        "state": task_result.state,
+        "state": task_state,
         "result": result,
         "publish_status": clip.publish_status,
         "published_media_id": clip.published_media_id,
@@ -508,14 +593,15 @@ async def distribute_clip(
         }
     clip.host_uploads = uploads
 
-    task = host_upload_task.delay(clip_id, user_id, selected)
-    clip.distribute_task_id = task.id
+    queued = await trigger_host_upload(clip_id, user_id, selected)
+    clip.distribute_task_id = queued["task_id"]
     await clip.save()
     return {
-        "task_id": task.id,
+        "task_id": queued["task_id"],
         "status": "queued",
         "hosts": selected,
         "mode": body.mode,
+        "execution_mode": queued["execution_mode"],
     }
 
 

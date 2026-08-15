@@ -89,13 +89,34 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+def _json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    filename = getattr(value, "filename", None)
+    if filename:
+        return str(filename)
+    return str(value)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = []
+    for err in exc.errors():
+        item = dict(err)
+        item["input"] = _json_safe(item.get("input"))
+        item.pop("ctx", None)
+        errors.append(item)
+    first_msg = next((str(err.get("msg") or "").strip() for err in errors if err.get("msg")), "")
     return JSONResponse(
         status_code=422,
         content={
             "error": "validation_error",
-            "detail": exc.errors(),
+            "detail": first_msg or "Invalid request",
+            "errors": errors,
             "status_code": 422,
             "request_id": getattr(request.state, "request_id", None),
         },

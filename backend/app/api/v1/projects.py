@@ -16,8 +16,12 @@ from app.models.asset import Asset
 from app.models.caption import Caption
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project, ProjectStatus, SummaryStatus
-from app.services.project_upload import create_project_from_upload
-from app.services.quality_host_routing import build_quality_distribute_plan, quality_key
+from app.services.project_upload import (
+    create_project_from_upload,
+    save_uploaded_video,
+    validate_video_upload,
+)
+from app.services.quality_host_routing import TARGET_QUALITY_KEYS, build_quality_distribute_plan, quality_key
 from app.services.ytdlp_service import YTDLPService
 from app.tasks.clip_task import _resolve_clip_source_path, trigger_auto_generate_clips
 from app.tasks.download_task import (
@@ -28,7 +32,7 @@ from app.tasks.download_task import (
 )
 from app.tasks.quality_distribute_task import trigger_distribute_project_qualities
 from app.tasks.summary_task import trigger_project_summary
-from app.tasks.upload_task import is_upload_project, retry_upload_processing
+from app.tasks.upload_task import attach_quality_file, is_upload_project, retry_upload_processing
 from app.utils.ffmpeg_utils import ffmpeg_available, ffmpeg_missing_message, get_ffmpeg_path, get_ffprobe_path
 
 
@@ -153,7 +157,9 @@ async def _run_refetch_pipeline_background(project_id: str, video_url: str) -> N
 
 
 async def trigger_refetch_source(project_id: str, video_url: str) -> dict[str, Any]:
-    asyncio.create_task(_run_refetch_pipeline_background(project_id, video_url))
+    from app.services.pipeline_runtime import spawn_background
+
+    spawn_background(_run_refetch_pipeline_background(project_id, video_url))
     return {"task_id": None, "execution_mode": "local-background"}
 
 
@@ -171,7 +177,9 @@ async def trigger_download(project_id: str, video_url: str) -> dict[str, Any]:
 
     claim_pipeline(project_id)
     try:
-        asyncio.create_task(_run_download_pipeline_background(project_id, video_url))
+        from app.services.pipeline_runtime import spawn_background
+
+        spawn_background(_run_download_pipeline_background(project_id, video_url))
     except Exception:
         release_pipeline(project_id)
         raise
@@ -332,11 +340,15 @@ async def seed_dummy_project(
 async def list_projects(user_id: str = Depends(get_current_user_id)):
     projects = await Project.find(Project.user_id == user_id).sort("-created_at").to_list()
     try:
-        from app.services.pipeline_runtime import resume_stale_project
+        from app.services.pipeline_runtime import fail_dead_upload_if_source_missing, resume_stale_project
 
+        recovered = []
         for project in projects:
             if project.status in (ProjectStatus.PENDING, ProjectStatus.DOWNLOADING):
+                project = await fail_dead_upload_if_source_missing(project)
                 await resume_stale_project(project)
+            recovered.append(project)
+        projects = recovered
     except Exception:
         pass
     return [serialize_document(project) for project in projects]
@@ -351,16 +363,25 @@ async def get_project(project_id: str, user_id: str = Depends(get_current_user_i
     if not project or project.user_id != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
+    pipeline_running = False
     try:
-        from app.services.pipeline_runtime import resume_stale_project
+        from app.services.pipeline_runtime import (
+            fail_dead_upload_if_source_missing,
+            pipeline_claimed,
+            resume_stale_project,
+        )
 
+        project = await fail_dead_upload_if_source_missing(project)
         await resume_stale_project(project)
         project = await Project.get(project_id) or project
+        pipeline_running = pipeline_claimed(project_id)
     except Exception:
         pass
 
     data = serialize_document(project)
     data["download_status"] = project.status
+    data["pipeline_running"] = pipeline_running
+    data["processing_step"] = (project.metadata or {}).get("processing_step")
     local_path = Path(project.local_video_path) if project.local_video_path else None
     from app.tasks.upload_task import is_upload_project
 
@@ -635,6 +656,56 @@ async def get_project_qualities(project_id: str, user_id: str = Depends(get_curr
         "project_id": project_id,
         "clip_source_quality": project.clip_source_quality or settings.clip_source_quality,
         "clips_expire_at": project.clips_expire_at.isoformat() if project.clips_expire_at else None,
+        **plan,
+    }
+
+
+@router.post("/{project_id}/qualities/{quality}")
+async def upload_project_quality(
+    project_id: str,
+    quality: str,
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    project = await Project.get(project_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    key = quality_key(quality)
+    if key not in TARGET_QUALITY_KEYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported quality. Use one of: {', '.join(q + 'p' for q in TARGET_QUALITY_KEYS)}",
+        )
+
+    if not ffmpeg_available():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=ffmpeg_missing_message())
+
+    ext = validate_video_upload(file)
+    staging_dir = Path(settings.temp_dir) / "uploads" / project_id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staging_path = staging_dir / f"{key}{ext}"
+    await save_uploaded_video(file, staging_path)
+
+    try:
+        result = await attach_quality_file(project_id, key, staging_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    finally:
+        try:
+            if staging_path.exists():
+                staging_path.unlink()
+        except OSError:
+            pass
+
+    fresh = await Project.get(project_id)
+    plan = build_quality_distribute_plan(fresh.quality_assets if fresh else project.quality_assets)
+    return {
+        **result,
         **plan,
     }
 

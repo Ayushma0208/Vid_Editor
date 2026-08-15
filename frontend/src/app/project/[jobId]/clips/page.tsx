@@ -19,6 +19,8 @@ type ProjectData = {
   is_upload?: boolean
   has_cloudinary_raw?: boolean
   needs_reupload?: boolean
+  pipeline_running?: boolean
+  processing_step?: string | null
   created_at?: string
   summary?: string | null
   summary_status?: string | null
@@ -377,7 +379,9 @@ export default function ProjectClipsPage() {
 
   // Poll while project is processing, clips are in progress, or first load is still retrying
   useEffect(() => {
-    const projectBusy = ["downloading", "pending"].includes((project?.status || "").toLowerCase())
+    const projectBusy =
+      ["downloading", "pending"].includes((project?.status || "").toLowerCase()) ||
+      project?.pipeline_running === true
     const clipsBusy = clips.some((c) => {
       const s = (c.status || "").toLowerCase()
       return s === "processing" || s === "pending"
@@ -386,7 +390,7 @@ export default function ProjectClipsPage() {
     if (!projectBusy && !clipsBusy && !waitingToLoad) return
     const interval = setInterval(loadProject, waitingToLoad ? 3000 : 5000)
     return () => clearInterval(interval)
-  }, [clips, project?.status, loadProject, project, error])
+  }, [clips, project?.status, project?.pipeline_running, loadProject, project, error])
 
   const handleClipDeleted = (clipId: string) => {
     setClips((prev) => prev.filter((c) => (c.id || c._id) !== clipId))
@@ -411,6 +415,7 @@ export default function ProjectClipsPage() {
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
       setError(typeof detail === "string" ? detail : "Could not retry processing.")
+      await loadProject()
     } finally {
       setIsRetrying(false)
     }
@@ -558,6 +563,13 @@ export default function ProjectClipsPage() {
   const readyCount = clips.filter((c) => (c.status || "").toLowerCase() === "ready").length
   const errorCount = clips.filter((c) => (c.status || "").toLowerCase() === "error").length
   const isProcessingUpload = projectStatus === "downloading" || projectStatus === "pending"
+  const pipelineRunning = project.pipeline_running === true
+  const processingStep =
+    typeof project.processing_step === "string" && project.processing_step.trim()
+      ? project.processing_step.trim()
+      : typeof project.metadata?.processing_step === "string"
+        ? project.metadata.processing_step.trim()
+        : ""
   const isUpload =
     project.is_upload === true ||
     project.metadata?.source === "upload" ||
@@ -580,11 +592,13 @@ export default function ProjectClipsPage() {
   const canGenerate = projectStatus === "ready" && !isProcessingUpload
   const sourceMissing = project.source_file_available === false
   const needsRefetch = !isUpload && !isProcessingUpload && sourceMissing && readyCount > 0 && !!project.yt_url
+  const missingSourceMessage = /no longer on the server|upload the video again/i.test(cleanedError || "")
   const needsReupload =
     isUpload &&
-    !isProcessingUpload &&
+    !pipelineRunning &&
     (project.needs_reupload === true ||
-      (sourceMissing && !project.has_cloudinary_raw && !project.cloudinary_raw_url))
+      missingSourceMessage ||
+      (sourceMissing && !project.has_cloudinary_raw && !project.cloudinary_raw_url && !isProcessingUpload))
   const canRestoreUpload =
     isUpload &&
     !isProcessingUpload &&
@@ -628,7 +642,7 @@ export default function ProjectClipsPage() {
               {isDownloadingAll ? "Saving…" : `Save all to hosting (${readyCount})`}
             </button>
           )}
-          {(projectStatus === "error" || isProcessingUpload) && (
+          {(projectStatus === "error" || (isProcessingUpload && !pipelineRunning)) && (
             <button
               onClick={handleRetryProcessing}
               disabled={isRetrying}
@@ -665,7 +679,9 @@ export default function ProjectClipsPage() {
             <h1 className="text-2xl font-bold text-slate-900">Clips</h1>
             <p className="mt-1 text-sm text-slate-600">
               {isProcessingUpload
-                ? "Processing your video — this can take several minutes for large files…"
+                ? (processingStep || (pipelineRunning
+                    ? "Processing your video — 60-second clips will appear here automatically…"
+                    : "This job stopped. Resume processing, or upload the video again if the file was lost."))
                 : clips.length === 0
                 ? "Upload complete — split the full video into 60-second clips"
                 : `${clips.length} clip${clips.length !== 1 ? "s" : ""} · ${readyCount} ready${errorCount ? ` · ${errorCount} error` : ""}`}
@@ -817,11 +833,13 @@ export default function ProjectClipsPage() {
             <p className="mt-1 text-xs text-[#3a3d52]">
               {projectStatus === "error"
                 ? "Fix the error above, then retry or upload again"
-                : isProcessingUpload
-                  ? "Video is still processing. 60-second clips will appear here automatically."
-                  : "Clips are created automatically after upload, or click below to split again"}
+                : isProcessingUpload && pipelineRunning
+                  ? (processingStep || "Video is processing. 60-second clips will appear here automatically.")
+                  : isProcessingUpload
+                    ? "Processing stopped. Click Resume, or re-upload from the dashboard if the file was lost."
+                    : "Clips are created automatically after upload, or click below to split again"}
             </p>
-            {(projectStatus === "error" || isProcessingUpload) && (
+            {(projectStatus === "error" || (isProcessingUpload && !pipelineRunning)) && (
               <button
                 onClick={handleRetryProcessing}
                 disabled={isRetrying}

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 from beanie import PydanticObjectId
@@ -8,7 +9,12 @@ import app.celery_worker as cw
 from app.config import settings
 from app.models.clip import Clip, ClipStatus
 from app.models.project import Project
+from app.services.pipeline_runtime import spawn_background
 from app.services.publish_service import PublishService
+from app.utils.celery_utils import celery_workers_available
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_instagram_caption(
@@ -175,6 +181,58 @@ async def _publish_all_instagram(
         "failed": failed,
         "results": results,
     }
+
+
+async def trigger_publish_clip(
+    platform: str,
+    clip_id: str,
+    user_id: str,
+    title: str = "",
+    description: str = "",
+) -> dict:
+    if await celery_workers_available():
+        try:
+            task = publish_clip_task.delay(platform, clip_id, user_id, title, description)
+            return {"task_id": task.id, "execution_mode": "celery"}
+        except Exception:
+            pass
+
+    async def _local() -> None:
+        try:
+            await _publish_clip(platform, clip_id, user_id, title, description)
+        except Exception:
+            clip = await Clip.get(PydanticObjectId(clip_id))
+            if clip:
+                clip.publish_platform = platform
+                clip.publish_status = "error"
+                await clip.save()
+
+    spawn_background(_local())
+    return {"task_id": "local-background", "execution_mode": "local-background"}
+
+
+async def trigger_publish_all_instagram(
+    project_id: str,
+    user_id: str,
+    title: str = "",
+    description: str = "",
+    clip_ids: list[str] | None = None,
+) -> dict:
+    if await celery_workers_available():
+        try:
+            task = publish_all_instagram_task.delay(project_id, user_id, title, description, clip_ids)
+            return {"task_id": task.id, "execution_mode": "celery"}
+        except Exception:
+            pass
+
+    async def _local() -> None:
+        try:
+            await _publish_all_instagram(project_id, user_id, title, description, clip_ids)
+        except Exception:
+            logger.exception("Local Instagram batch publish failed for %s", project_id)
+
+    spawn_background(_local())
+    return {"task_id": "local-background", "execution_mode": "local-background"}
 
 
 @celery_app.task(bind=True, name="publish_clip_task")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -10,13 +11,22 @@ class XfsUploadError(RuntimeError):
     pass
 
 
+def _normalize_api_key(raw: str) -> str:
+    key = (raw or "").strip()
+    if key.startswith("http") and "key=" in key:
+        extracted = (parse_qs(urlparse(key).query).get("key") or [""])[0].strip()
+        if extracted:
+            return extracted
+    return key
+
+
 class XfsUploadService:
     """XFileSharing-style API client (Uploadrar, Up-4ever, etc.)."""
 
     def __init__(self, *, host_key: str, base_url: str, api_key: str):
         self.host_key = host_key
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key.strip()
+        self.api_key = _normalize_api_key(api_key)
 
     def is_configured(self) -> bool:
         return bool(self.api_key and self.base_url)

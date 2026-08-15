@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,22 +12,98 @@ from beanie import PydanticObjectId
 
 logger = logging.getLogger(__name__)
 
-_in_flight: set[str] = set()
+_in_flight: dict[str, float] = {}
+_tasks: set[asyncio.Task] = set()
+STALE_CLAIM_SECONDS = 120.0
 
 
 def pipeline_claimed(project_id: str) -> bool:
-    return project_id in _in_flight
-
-
-def claim_pipeline(project_id: str) -> bool:
-    if project_id in _in_flight:
+    started = _in_flight.get(project_id)
+    if started is None:
         return False
-    _in_flight.add(project_id)
+    if time.monotonic() - started > STALE_CLAIM_SECONDS * 5:
+        _in_flight.pop(project_id, None)
+        return False
     return True
 
 
+def claim_pipeline(project_id: str, *, steal_after: float = STALE_CLAIM_SECONDS) -> bool:
+    now = time.monotonic()
+    started = _in_flight.get(project_id)
+    if started is not None and now - started < steal_after:
+        return False
+    _in_flight[project_id] = now
+    return True
+
+
+def touch_pipeline(project_id: str) -> None:
+    if project_id in _in_flight:
+        _in_flight[project_id] = time.monotonic()
+
+
 def release_pipeline(project_id: str) -> None:
-    _in_flight.discard(project_id)
+    _in_flight.pop(project_id, None)
+
+
+def spawn_background(coro) -> asyncio.Task:
+    """Schedule a coroutine and keep a strong reference so it is not garbage-collected."""
+    task = asyncio.create_task(coro)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+    return task
+
+
+async def set_processing_step(project_id: str, step: str) -> None:
+    from app.models.project import Project
+
+    touch_pipeline(project_id)
+    try:
+        project = await Project.get(PydanticObjectId(project_id))
+        if not project:
+            return
+        meta = dict(project.metadata or {})
+        meta["processing_step"] = step
+        project.metadata = meta
+        project.updated_at = datetime.now(timezone.utc)
+        await project.save()
+    except Exception:
+        logger.exception("Could not update processing step for %s", project_id)
+
+
+def _local_upload_source_exists(project) -> bool:
+    from app.tasks.upload_task import staging_upload_path
+
+    metadata = project.metadata or {}
+    original_filename = metadata.get("original_filename")
+    if original_filename:
+        staged = staging_upload_path(project.user_id, str(original_filename))
+        if staged.is_file():
+            return True
+    if project.local_video_path and Path(str(project.local_video_path)).is_file():
+        return True
+    return False
+
+
+async def fail_dead_upload_if_source_missing(project):
+    """If an upload is stuck and the file is gone, mark error immediately (don't stay on Downloading)."""
+    from app.models.project import Project, ProjectStatus
+    from app.tasks.download_task import _set_project_error
+    from app.tasks.upload_task import is_upload_project
+
+    if not is_upload_project(project):
+        return project
+    if project.status not in (ProjectStatus.PENDING, ProjectStatus.DOWNLOADING):
+        return project
+    if pipeline_claimed(str(project.id)):
+        return project
+    if _local_upload_source_exists(project) or project.cloudinary_raw_url:
+        return project
+
+    await _set_project_error(
+        project,
+        "Original upload is no longer on the server. Please upload the video again from the dashboard.",
+    )
+    return await Project.get(project.id) or project
 
 
 async def recover_stale_pipelines() -> None:
@@ -62,9 +139,9 @@ async def resume_stale_project(project, force: bool = False) -> bool:
                 if updated.tzinfo is None:
                     updated = updated.replace(tzinfo=timezone.utc)
                 age = (datetime.now(timezone.utc) - updated).total_seconds()
-                if age < 90:
+                if age < 20:
                     return False
-        asyncio.create_task(_resume_processing(project_id))
+        spawn_background(_resume_processing(project_id))
         return True
 
     if status != ProjectStatus.READY:
@@ -79,7 +156,7 @@ async def resume_stale_project(project, force: bool = False) -> bool:
     existing = await Clip.find(Clip.project_id == project_id).count()
     if existing > 0:
         return False
-    asyncio.create_task(_kick_missing_clips(project_id))
+    spawn_background(_kick_missing_clips(project_id))
     return True
 
 
@@ -90,6 +167,7 @@ async def _kick_missing_clips(project_id: str) -> None:
     if not claim_pipeline(project_id):
         return
     try:
+        await set_processing_step(project_id, "Cutting 60-second clips…")
         await auto_generate_project_clips(project_id, settings.default_clip_duration_seconds)
     except Exception:
         logger.exception("Failed to start missing clip generation for %s", project_id)
@@ -100,12 +178,7 @@ async def _kick_missing_clips(project_id: str) -> None:
 async def _resume_processing(project_id: str) -> None:
     from app.models.project import Project
     from app.tasks.download_task import _run_download_pipeline, _set_project_error
-    from app.tasks.upload_task import (
-        _run_upload_pipeline,
-        is_upload_project,
-        restore_upload_source_from_cloudinary,
-        staging_upload_path,
-    )
+    from app.tasks.upload_task import is_upload_project
     from app.utils.ffmpeg_utils import format_exception
 
     if not claim_pipeline(project_id):
@@ -115,6 +188,7 @@ async def _resume_processing(project_id: str) -> None:
         if not project:
             return
 
+        await set_processing_step(project_id, "Resuming processing…")
         if is_upload_project(project):
             await _resume_upload(project)
         else:
@@ -122,8 +196,6 @@ async def _resume_processing(project_id: str) -> None:
     except Exception as exc:
         logger.exception("Resume processing failed for %s", project_id)
         try:
-            from app.models.project import Project
-
             fresh = await Project.get(PydanticObjectId(project_id))
             if fresh:
                 await _set_project_error(fresh, format_exception(exc))
@@ -134,15 +206,13 @@ async def _resume_processing(project_id: str) -> None:
 
 
 async def _resume_upload(project) -> None:
-    from pathlib import Path
-
+    from app.config import settings
     from app.tasks.clip_task import start_local_clip_generation
     from app.tasks.upload_task import (
         _run_upload_pipeline,
         restore_upload_source_from_cloudinary,
         staging_upload_path,
     )
-    from app.config import settings
 
     metadata = project.metadata or {}
     original_filename = metadata.get("original_filename")
@@ -163,5 +233,5 @@ async def _resume_upload(project) -> None:
         return
 
     raise FileNotFoundError(
-        "Original upload is no longer on the server. Please upload the video again."
+        "Original upload is no longer on the server. Please upload the video again from the dashboard."
     )

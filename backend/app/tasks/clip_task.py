@@ -507,7 +507,11 @@ async def auto_generate_project_clips(project_id: str, clip_duration: int | None
         part_number += 1
 
     # Process after all rows exist so the UI can show pending clips immediately.
-    for clip_id in created_ids:
+    from app.services.pipeline_runtime import set_processing_step
+
+    total = len(created_ids)
+    for index, clip_id in enumerate(created_ids, start=1):
+        await set_processing_step(project_id, f"Cutting clip {index} of {total}…")
         await run_clip_processing(project_id, clip_id)
         queued_count += 1
 
