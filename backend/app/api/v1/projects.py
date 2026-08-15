@@ -342,6 +342,7 @@ async def seed_dummy_project(
     return response
 
 
+@router.get("")
 @router.get("/")
 async def list_projects(user_id: str = Depends(get_current_user_id)):
     projects = await Project.find(Project.user_id == user_id).sort("-created_at").to_list()

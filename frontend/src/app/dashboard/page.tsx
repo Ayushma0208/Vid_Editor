@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import api from "@/lib/api"
+import api, { isTransientNetworkError, wakeApiServer, withTransientRetry } from "@/lib/api"
 
 type ProjectItem = {
   id?: string
@@ -100,18 +100,39 @@ export default function DashboardPage() {
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
 
   const loadProjects = useCallback(async () => {
-    try {
-      const response = await api.get("/api/v1/projects/")
-      setProjects(Array.isArray(response.data) ? response.data : [])
-    } catch { /* keep existing */ }
+    const response = await withTransientRetry(
+      () => api.get("/api/v1/projects/", { timeout: 60000 }),
+      2,
+    )
+    setProjects(Array.isArray(response.data) ? response.data : [])
   }, [])
 
   useEffect(() => {
     const token = localStorage.getItem("token")
-    if (!token) { router.push("/login"); return }
-    api.get("/api/v1/projects/")
-      .then((r) => setProjects(Array.isArray(r.data) ? r.data : []))
-      .catch(() => setError("Could not load projects."))
+    if (!token) {
+      router.push("/login")
+      return
+    }
+    wakeApiServer()
+    withTransientRetry(() => api.get("/api/v1/projects/", { timeout: 60000 }), 2)
+      .then((r) => {
+        setProjects(Array.isArray(r.data) ? r.data : [])
+        setError(null)
+      })
+      .catch((err: unknown) => {
+        const status = (err as { response?: { status?: number; data?: { detail?: string } } })?.response?.status
+        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        if (status === 401 || status === 403) {
+          localStorage.removeItem("token")
+          router.push("/login")
+          return
+        }
+        if (isTransientNetworkError(err)) {
+          setError("Backend is waking up or unreachable. Wait a few seconds and refresh.")
+          return
+        }
+        setError(typeof detail === "string" && detail.trim() ? detail : "Could not load projects.")
+      })
       .finally(() => setIsLoading(false))
   }, [router])
 

@@ -26,16 +26,24 @@ socket_app = socketio.ASGIApp(sio, socketio_path="socket.io")
 app.mount("/socket.io", socket_app)
 
 app.include_router(api_router, prefix="/api/v1")
-allowed_origins = list(
-    {
-        settings.frontend_url.rstrip("/"),
+
+def _cors_origins() -> list[str]:
+    origins = {
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "https://vid-editor-tan.vercel.app",
     }
-)
+    for part in (settings.frontend_url or "").split(","):
+        origin = part.strip().rstrip("/")
+        if origin:
+            origins.add(origin)
+    return [item for item in origins if item]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=_cors_origins(),
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
