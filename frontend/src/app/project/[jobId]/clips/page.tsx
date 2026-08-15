@@ -156,20 +156,64 @@ function ClipModal({
   const [isDeleting, setIsDeleting] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [playbackError, setPlaybackError] = useState<string | null>(null)
+  const [isRebuilding, setIsRebuilding] = useState(false)
+  const [srcNonce, setSrcNonce] = useState(0)
+  const [overrideUrl, setOverrideUrl] = useState<string | null>(null)
+  const [useStream, setUseStream] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const rebuildAttempted = useRef(false)
   const isReady = (clip.status || "").toLowerCase() === "ready"
+  const hostedUrl = overrideUrl || clip.cloudinary_clip_url || ""
 
-  const videoSrc = clip.cloudinary_clip_url
-    ? clip.cloudinary_clip_url
+  const videoSrc = hostedUrl && !useStream
+    ? `${hostedUrl}${hostedUrl.includes("?") ? "&" : "?"}v=${srcNonce}`
     : isReady
-      ? clipStreamUrl(projectId, clipId, token)
+      ? `${clipStreamUrl(projectId, clipId, token)}&v=${srcNonce}`
       : ""
 
   const posterUrl = clipThumbnailUrl(projectId, clipId, token, clip.thumbnail_url)
+  const missingFileMessage =
+    "Clip file is missing on the server. For uploads, re-upload the video from the dashboard. For YouTube, use Refetch source."
 
   useEffect(() => {
     setPlaybackError(null)
-  }, [clipId, videoSrc])
+    setOverrideUrl(null)
+    setUseStream(false)
+    rebuildAttempted.current = false
+  }, [clipId])
+
+  const rebuildClip = async () => {
+    if (isRebuilding || rebuildAttempted.current) return
+    rebuildAttempted.current = true
+    setIsRebuilding(true)
+    setPlaybackError(null)
+    setUseStream(true)
+    try {
+      const res = await api.post(
+        `/api/v1/projects/${projectId}/clips/${clipId}/rebuild`,
+        {},
+        { timeout: 300000 },
+      )
+      const url = res.data?.cloudinary_clip_url as string | undefined
+      if (url) {
+        setOverrideUrl(url)
+        setUseStream(false)
+      }
+      setSrcNonce((value) => value + 1)
+    } catch (err: unknown) {
+      setPlaybackError(getApiErrorDetail(err, missingFileMessage))
+    } finally {
+      setIsRebuilding(false)
+    }
+  }
+
+  const handlePlaybackError = () => {
+    if (rebuildAttempted.current) {
+      setPlaybackError(missingFileMessage)
+      return
+    }
+    void rebuildClip()
+  }
 
   const handleDownload = async (e?: MouseEvent) => {
     e?.stopPropagation()
@@ -266,18 +310,16 @@ function ClipModal({
 
         {/* Video player */}
         <div className="bg-slate-100">
-          {clip.status === "ready" && videoSrc && !playbackError ? (
+          {clip.status === "ready" && videoSrc && !playbackError && !isRebuilding ? (
             <video
               ref={videoRef}
               src={videoSrc}
               controls
               autoPlay
+              playsInline
+              preload="metadata"
               poster={posterUrl || undefined}
-              onError={() =>
-                setPlaybackError(
-                  "Clip file is missing on the server. For uploads, re-upload the video. For YouTube, use Refetch source.",
-                )
-              }
+              onError={handlePlaybackError}
               className="w-full max-h-[440px] object-contain"
             />
           ) : (
@@ -289,7 +331,11 @@ function ClipModal({
                   <>
                     <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-4 border-[#5b6ef5] border-t-transparent" />
                     <p className="text-sm text-[#4a4d60]">
-                      {clip.status === "processing" ? "Clip is being processed…" : "Clip not ready yet"}
+                      {isRebuilding
+                        ? "Rebuilding this clip from the original video…"
+                        : clip.status === "processing"
+                          ? "Clip is being processed…"
+                          : "Clip not ready yet"}
                     </p>
                   </>
                 )}

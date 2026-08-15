@@ -164,6 +164,12 @@ async def _acquire_raw_video(project: Project, project_id: str) -> str:
         if local_path.is_file():
             return str(local_path.resolve())
 
+    from app.tasks.upload_task import find_upload_source
+
+    staged = find_upload_source(project)
+    if staged:
+        return str(staged.resolve())
+
     if not project.cloudinary_raw_url:
         raise RuntimeError("Project has no local video file and no Cloudinary raw URL")
 
@@ -318,8 +324,14 @@ def _should_append_ad() -> bool:
 
 
 async def run_clip_processing(project_id: str, clip_id: str) -> dict:
-    project = await Project.get(PydanticObjectId(project_id))
-    clip = await Clip.get(PydanticObjectId(clip_id))
+    project = await Project.get(project_id)
+    clip = await Clip.get(clip_id)
+    if not project or not clip:
+        try:
+            project = project or await Project.get(PydanticObjectId(project_id))
+            clip = clip or await Clip.get(PydanticObjectId(clip_id))
+        except Exception:
+            pass
     if not project or not clip:
         raise RuntimeError("Project or clip not found")
 

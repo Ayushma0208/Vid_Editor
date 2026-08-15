@@ -1,5 +1,6 @@
 import asyncio
 import io
+import logging
 import re
 import tempfile
 import zipfile
@@ -22,6 +23,7 @@ from app.tasks.clip_task import create_clip_task, run_clip_processing
 
 
 router = APIRouter(tags=["clips"])
+logger = logging.getLogger(__name__)
 
 
 class CreateClipRequest(BaseModel):
@@ -194,28 +196,8 @@ async def stream_project_clip(project_id: str, clip_id: str, request: Request, t
                 path=str(clip_path),
                 media_type="video/mp4",
                 filename=f"{clip.label or clip_id}.mp4",
+                headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"},
             )
-
-    # Temp disk wiped — try rebuilding from Cloudinary raw / remaining local source.
-    if clip.status == ClipStatus.READY:
-        project = await Project.get(project_id)
-        if project and (project.cloudinary_raw_url or project.local_video_path):
-            try:
-                from app.tasks.clip_task import run_clip_processing
-
-                await run_clip_processing(project_id, clip_id)
-                refreshed = await Clip.get(clip_id)
-                if refreshed and refreshed.cloudinary_clip_url:
-                    from fastapi.responses import RedirectResponse
-                    return RedirectResponse(url=refreshed.cloudinary_clip_url)
-                if refreshed and refreshed.local_clip_path and Path(refreshed.local_clip_path).is_file():
-                    return FileResponse(
-                        path=str(refreshed.local_clip_path),
-                        media_type="video/mp4",
-                        filename=f"{clip.label or clip_id}.mp4",
-                    )
-            except Exception:
-                pass
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -224,6 +206,50 @@ async def stream_project_clip(project_id: str, clip_id: str, request: Request, t
             "For YouTube projects use Refetch source; for manual uploads re-upload the video."
         ),
     )
+
+
+@router.post("/projects/{project_id}/clips/{clip_id}/rebuild")
+async def rebuild_project_clip(project_id: str, clip_id: str, user_id: str = Depends(get_current_user_id)):
+    project = await Project.get(project_id)
+    clip = await Clip.get(clip_id)
+    if not project or project.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if not clip or clip.project_id != project_id or clip.user_id != user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+
+    from app.tasks.clip_task import _resolve_clip_source_path, run_clip_processing
+    from app.tasks.upload_task import find_upload_source
+
+    source = _resolve_clip_source_path(project) or find_upload_source(project)
+    if source:
+        project.local_video_path = str(source)
+        await project.save()
+    elif not project.cloudinary_raw_url:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Original video is gone from the server. For uploads, re-upload the video from the dashboard. For YouTube, use Refetch source.",
+        )
+
+    try:
+        await run_clip_processing(project_id, clip_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Clip rebuild failed project=%s clip=%s", project_id, clip_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not rebuild this clip. For uploads, re-upload the video from the dashboard. For YouTube, use Refetch source.",
+        )
+
+    refreshed = await Clip.get(clip_id)
+    if not refreshed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Clip not found")
+    if refreshed.status != ClipStatus.READY:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not rebuild this clip. For uploads, re-upload the video from the dashboard. For YouTube, use Refetch source.",
+        )
+    return serialize_document(refreshed)
 
 
 @router.get("/projects/{project_id}/clips/{clip_id}/download")

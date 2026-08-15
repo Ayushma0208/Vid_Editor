@@ -224,22 +224,33 @@ class FfmpegService:
         if part_label:
             work_path = str(Path(output_path).with_suffix(".work.mp4"))
 
-        try:
-            await self._run_ffmpeg(
-                "-y",
-                "-ss",
-                str(start_time),
-                "-i",
-                input_path,
-                "-t",
-                str(duration),
-                "-c",
-                "copy",
-                "-avoid_negative_ts",
-                "make_zero",
-                work_path,
-            )
-        except RuntimeError:
+        # WebM/Opus copied into .mp4 is not playable in Chrome — always re-encode
+        # those to H.264 + AAC. Stream-copy only when the source is already MP4.
+        source_ext = Path(input_path).suffix.lower()
+        copy_ok = source_ext in {".mp4", ".m4v"}
+        encoded = False
+        if copy_ok:
+            try:
+                await self._run_ffmpeg(
+                    "-y",
+                    "-ss",
+                    str(start_time),
+                    "-i",
+                    input_path,
+                    "-t",
+                    str(duration),
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    "-movflags",
+                    "+faststart",
+                    work_path,
+                )
+                encoded = True
+            except RuntimeError:
+                encoded = False
+        if not encoded:
             await self._run_ffmpeg(
                 "-y",
                 "-threads",
@@ -254,8 +265,12 @@ class FfmpegService:
                 "libx264",
                 "-preset",
                 "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
                 "-c:a",
                 "aac",
+                "-ac",
+                "2",
                 "-movflags",
                 "+faststart",
                 work_path,
