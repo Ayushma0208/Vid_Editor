@@ -347,7 +347,7 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
             output_path=clip_output_path,
             start_time=clip.start_time,
             end_time=clip.end_time,
-            part_label=clip.label or None,
+            part_label=None,
         )
 
         await _generate_thumbnail(clip_output_path, thumbnail_output_path, clip.duration / 2)
@@ -365,29 +365,32 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
         clip.local_thumbnail_path = saved_thumb_path
         clip.file_size_bytes = Path(saved_clip_path).stat().st_size
         clip.status = ClipStatus.READY
+        await clip.save()
 
-        # Score the content cut (without optional ad) so ads don't inflate interest.
         try:
-            await InterestScoreService(ffmpeg_service).apply_scores_to_clip(clip, clip_output_path)
+            await asyncio.wait_for(
+                InterestScoreService(ffmpeg_service).apply_scores_to_clip(clip, clip_output_path),
+                timeout=45,
+            )
+            await clip.save()
         except Exception:
-            clip.interest_score = None
-            clip.interest_audio = None
-            clip.interest_motion = None
+            logger.exception("Interest scoring failed clip=%s", clip_id)
 
         try:
-            await _upload_clip_to_cloudinary(
-                clip,
-                video_path=saved_clip_path,
-                thumb_path=saved_thumb_path,
+            await asyncio.wait_for(
+                _upload_clip_to_cloudinary(
+                    clip,
+                    video_path=saved_clip_path,
+                    thumb_path=saved_thumb_path,
+                ),
+                timeout=90,
             )
         except Exception:
             logger.exception(
-                "Cloudinary clip upload failed project=%s clip=%s — Instagram publish needs a retry",
+                "Cloudinary clip upload failed project=%s clip=%s — Instagram publish can retry later",
                 project_id,
                 clip_id,
             )
-
-        await clip.save()
     except Exception as exc:
         clip.status = ClipStatus.ERROR
         await clip.save()

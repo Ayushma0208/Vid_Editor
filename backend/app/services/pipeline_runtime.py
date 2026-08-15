@@ -98,6 +98,7 @@ async def fail_dead_upload_if_source_missing(project):
 
 
 async def recover_stale_pipelines() -> None:
+    from app.models.clip import Clip, ClipStatus
     from app.models.project import Project, ProjectStatus
 
     try:
@@ -106,10 +107,28 @@ async def recover_stale_pipelines() -> None:
         ).to_list()
     except Exception:
         logger.exception("Could not list stuck projects for recovery")
-        return
+        stuck = []
 
     for project in stuck:
         await resume_stale_project(project, force=True)
+
+    try:
+        unfinished_clips = await Clip.find(
+            {"status": {"$in": [ClipStatus.PENDING.value, ClipStatus.PROCESSING.value]}}
+        ).to_list()
+    except Exception:
+        logger.exception("Could not list unfinished clips for recovery")
+        return
+
+    seen: set[str] = set()
+    for clip in unfinished_clips:
+        project_id = str(clip.project_id)
+        if project_id in seen:
+            continue
+        seen.add(project_id)
+        project = await Project.get(PydanticObjectId(project_id))
+        if project:
+            await resume_stale_project(project, force=True)
 
 
 async def resume_stale_project(project, force: bool = False) -> bool:
@@ -144,11 +163,45 @@ async def resume_stale_project(project, force: bool = False) -> bool:
     source = _resolve_clip_source_path(project)
     if not source and not project.cloudinary_raw_url:
         return False
+    unfinished = await Clip.find(
+        Clip.project_id == project_id,
+        {"status": {"$in": ["pending", "processing"]}},
+    ).count()
+    if unfinished > 0:
+        spawn_background(_resume_unfinished_clips(project_id))
+        return True
     existing = await Clip.find(Clip.project_id == project_id).count()
     if existing > 0:
         return False
     spawn_background(_kick_missing_clips(project_id))
     return True
+
+
+async def _resume_unfinished_clips(project_id: str) -> None:
+    from app.models.clip import Clip, ClipStatus
+    from app.tasks.clip_task import run_clip_processing
+
+    if not claim_pipeline(project_id):
+        return
+    try:
+        clips = await Clip.find(Clip.project_id == project_id).to_list()
+        todo = [
+            clip
+            for clip in clips
+            if clip.status in (ClipStatus.PENDING, ClipStatus.PROCESSING)
+        ]
+        todo.sort(key=lambda clip: (clip.start_time, str(clip.id)))
+        total = len(todo)
+        for index, clip in enumerate(todo, start=1):
+            await set_processing_step(project_id, f"Cutting clip {index} of {total}…")
+            try:
+                await run_clip_processing(project_id, str(clip.id))
+            except Exception:
+                logger.exception("Resume cut failed for clip %s", clip.id)
+    except Exception:
+        logger.exception("Failed to resume unfinished clips for %s", project_id)
+    finally:
+        release_pipeline(project_id)
 
 
 async def _kick_missing_clips(project_id: str) -> None:

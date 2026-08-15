@@ -58,7 +58,7 @@ class FfmpegService:
                 return candidate
         return None
 
-    async def _run_ffmpeg(self, *args: str) -> None:
+    async def _run_ffmpeg(self, *args: str, timeout: float = 240) -> None:
         ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
         process = await asyncio.create_subprocess_exec(
             ffmpeg_bin,
@@ -66,7 +66,12 @@ class FfmpegService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await process.communicate()
+        try:
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(f"FFmpeg timed out after {int(timeout)}s")
         if process.returncode != 0:
             raise RuntimeError(stderr.decode().strip() or "FFmpeg command failed")
 
