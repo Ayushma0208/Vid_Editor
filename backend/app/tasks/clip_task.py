@@ -380,6 +380,11 @@ async def run_clip_processing(project_id: str, clip_id: str) -> dict:
         await clip.save()
 
         try:
+            await asyncio.wait_for(_upload_clip_thumbnail(clip, saved_thumb_path), timeout=20)
+        except Exception:
+            logger.exception("Cloudinary thumbnail upload failed clip=%s", clip_id)
+
+        try:
             await asyncio.wait_for(
                 InterestScoreService(ffmpeg_service).apply_scores_to_clip(clip, clip_output_path),
                 timeout=45,
@@ -561,6 +566,27 @@ async def _set_cloudinary_sync_meta(project_id: str, patch: dict[str, Any]) -> N
     await project.save()
 
 
+async def _upload_clip_thumbnail(clip: Clip, thumb_path: str | None = None) -> Clip:
+    """Upload the small JPEG first so clip cards survive Render disk wipes."""
+    if clip.thumbnail_url:
+        return clip
+    if not _cloudinary_configured():
+        return clip
+    path = Path(thumb_path or clip.local_thumbnail_path or "")
+    if not path.is_file():
+        return clip
+    service = CloudinaryService()
+    thumb_upload = await service.upload_image(
+        file_path=str(path),
+        folder=f"projects/{clip.project_id}/clips/{clip.id}_thumb",
+    )
+    url = thumb_upload.get("secure_url") or thumb_upload.get("url")
+    if url:
+        clip.thumbnail_url = url
+        await clip.save()
+    return clip
+
+
 async def _upload_clip_to_cloudinary(
     clip: Clip,
     video_path: str,
@@ -585,7 +611,7 @@ async def _upload_clip_to_cloudinary(
                 raise RuntimeError("Cloudinary did not return a video URL")
             clip.cloudinary_clip_url = url
             clip.cloudinary_public_id = clip_upload.get("public_id")
-            if thumb_path and Path(thumb_path).is_file():
+            if thumb_path and Path(thumb_path).is_file() and not clip.thumbnail_url:
                 try:
                     thumb_upload = await service.upload_image(
                         file_path=thumb_path,

@@ -10,11 +10,12 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from app.api.dependencies import get_current_user_id, resolve_user_id_from_token
+from app.config import settings
 from app.models.clip import Clip, ClipStatus, ClipType
 from app.models.project import Project
 from app.services.cloudinary_service import CloudinaryService
@@ -497,6 +498,73 @@ async def save_all_project_clips_remote(
     }
 
 
+_thumb_regen_locks: dict[str, asyncio.Lock] = {}
+
+# Minimal valid 1x1 JPEG used when the source video is also gone.
+_PLACEHOLDER_JPEG = bytes.fromhex(
+    "ffd8ffdb0043000101010101010101010101010101010101010101010101010101"
+    "010101010101010101010101010101010101010101010101010101010101010101"
+    "01010101010101ffc2000b080001000101011100ffc40014001000000000000000"
+    "00000000000000000000ffda00080101000000013f00ffd9"
+)
+
+
+def _clip_thumb_lock(project_id: str) -> asyncio.Lock:
+    lock = _thumb_regen_locks.get(project_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _thumb_regen_locks[project_id] = lock
+    return lock
+
+
+def _serve_jpeg(path: Path) -> FileResponse:
+    return FileResponse(
+        path=str(path),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _placeholder_thumb_response() -> Response:
+    return Response(
+        content=_PLACEHOLDER_JPEG,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _regenerate_clip_thumbnail(project_id: str, clip: Clip) -> Path | None:
+    from app.tasks.clip_task import _generate_thumbnail, _resolve_clip_source_path
+    from app.tasks.upload_task import find_upload_source
+
+    clip_id = str(clip.id)
+    temp_dir = Path(settings.temp_dir) / project_id / "clips"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    output_path = temp_dir / f"{clip_id}_thumb.jpg"
+
+    source: str | None = None
+    seek = max(0.0, float(clip.duration or 0) / 2)
+    if clip.local_clip_path and Path(clip.local_clip_path).is_file():
+        source = clip.local_clip_path
+    else:
+        project = await Project.get(project_id)
+        if project:
+            resolved = _resolve_clip_source_path(project) or find_upload_source(project)
+            if resolved:
+                source = str(resolved)
+                seek = max(0.0, float(clip.start_time or 0) + float(clip.duration or 0) / 2)
+
+    if not source:
+        return None
+
+    await asyncio.wait_for(_generate_thumbnail(source, str(output_path), seek), timeout=20)
+    if not output_path.is_file():
+        return None
+    clip.local_thumbnail_path = str(output_path)
+    await clip.save()
+    return output_path
+
+
 @router.get("/projects/{project_id}/clips/{clip_id}/thumbnail")
 async def stream_project_clip_thumbnail(project_id: str, clip_id: str, request: Request, token: str = ""):
     user_id = resolve_user_id_from_token(token, request)
@@ -508,14 +576,23 @@ async def stream_project_clip_thumbnail(project_id: str, clip_id: str, request: 
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url=clip.thumbnail_url)
 
-    if not clip.local_thumbnail_path:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail not available")
+    if clip.local_thumbnail_path:
+        thumb_path = Path(clip.local_thumbnail_path)
+        if thumb_path.is_file():
+            return _serve_jpeg(thumb_path)
 
-    thumb_path = Path(clip.local_thumbnail_path)
-    if not thumb_path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thumbnail file not found on disk")
+    async with _clip_thumb_lock(project_id):
+        refreshed = await Clip.get(clip_id)
+        if refreshed and refreshed.local_thumbnail_path and Path(refreshed.local_thumbnail_path).is_file():
+            return _serve_jpeg(Path(refreshed.local_thumbnail_path))
+        try:
+            rebuilt = await _regenerate_clip_thumbnail(project_id, refreshed or clip)
+            if rebuilt and rebuilt.is_file():
+                return _serve_jpeg(rebuilt)
+        except Exception:
+            logger.exception("Thumbnail regenerate failed project=%s clip=%s", project_id, clip_id)
 
-    return FileResponse(path=str(thumb_path), media_type="image/jpeg")
+    return _placeholder_thumb_response()
 
 
 @router.get("/clips/{clip_id}")

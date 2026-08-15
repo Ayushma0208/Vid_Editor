@@ -56,9 +56,13 @@ async def request_id_middleware(request: Request, call_next):
     request.state.request_id = request_id
 
     user_id = None
+    token = ""
     auth_header = request.headers.get("authorization")
     if auth_header and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1]
+        token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        token = (request.query_params.get("token") or "").strip()
+    if token:
         try:
             payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
             user_id = payload.get("sub")
