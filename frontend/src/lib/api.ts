@@ -35,18 +35,27 @@ export async function withTransientRetry<T>(request: () => Promise<T>, retries =
     return await request()
   } catch (error) {
     if (retries > 0 && isTransientNetworkError(error)) {
+      await new Promise((resolve) => setTimeout(resolve, 2500))
       return withTransientRetry(request, retries - 1)
     }
     throw error
   }
 }
 
-export function wakeApiServer(): void {
-  if (!apiBaseUrl || typeof window === "undefined") return
-  void fetch(`${apiBaseUrl.replace(/\/$/, "")}/health`, {
-    cache: "no-store",
-    mode: "cors",
-  }).catch(() => {})
+export async function wakeApiServer(timeoutMs = 90000): Promise<boolean> {
+  if (!apiBaseUrl || typeof window === "undefined") return false
+  const health = `${apiBaseUrl.replace(/\/$/, "")}/health`
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(health, { cache: "no-store", mode: "cors" })
+      if (response.ok) return true
+    } catch {
+      // Render free instances often 502 while booting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000))
+  }
+  return false
 }
 
 export default api

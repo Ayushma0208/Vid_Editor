@@ -151,8 +151,8 @@ async def on_startup() -> None:
         print(f"[startup] WARNING: stale pipeline recovery failed: {exc}")
 
 
-@app.get("/")
-@app.get("/health")
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Liveness probe for Render/Docker — must stay fast and always return 200.
 

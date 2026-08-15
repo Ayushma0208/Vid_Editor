@@ -38,51 +38,44 @@ def _is_cloudinary_size_limit(message: str) -> bool:
 
 
 async def _backup_source_to_cloudinary(project: Project, source_path: Path) -> None:
-    """Persist the original upload before FFmpeg/temp wipe so retries can restore it."""
+    """Persist the original upload before FFmpeg/temp wipe so retries can restore it.
+
+    Do not re-encode oversized files here: ffmpeg compress on a 512MB Render
+    instance OOMs and the process restarts in a loop.
+    """
     if project.cloudinary_raw_url or not source_path.is_file():
+        return
+    metadata = dict(project.metadata or {})
+    if metadata.get("cloudinary_backup_skipped"):
         return
     cloudinary = CloudinaryService()
     if not cloudinary.is_configured():
         logger.warning("Cloudinary is not configured; upload %s has no durable backup", project.id)
         return
 
-    async def _upload(path: Path) -> None:
-        raw_upload = await cloudinary.upload_video(
-            str(path),
-            folder=f"projects/{project.id}/raw",
-        )
-        project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
-        project.cloudinary_folder = f"projects/{project.id}/"
-        await project.save()
-
-    try:
-        await _upload(source_path)
-        return
-    except Exception as exc:
-        if not _is_cloudinary_size_limit(str(exc)):
-            raise
+    size = source_path.stat().st_size
+    if size > _CLOUDINARY_SAFE_VIDEO_BYTES:
         logger.warning(
-            "Cloudinary rejected %s (%s bytes); compressing a backup under 100MB",
-            source_path.name,
-            source_path.stat().st_size,
+            "Skipping Cloudinary source backup for %s (%s bytes > 100MB limit). "
+            "Continuing local clip processing.",
+            project.id,
+            size,
         )
-        size_error = exc
-
-    if not ffmpeg_available():
-        raise size_error
-
-    compressed_path = source_path.with_name(f"{source_path.stem}.cloudinary-backup.mp4")
-    try:
-        ffmpeg_service = FfmpegService()
-        await ffmpeg_service.compress_under_bytes(
-            str(source_path),
-            str(compressed_path),
-            _CLOUDINARY_SAFE_VIDEO_BYTES,
+        metadata["cloudinary_backup_skipped"] = True
+        metadata["cloudinary_backup_skip_reason"] = (
+            f"Source is {size} bytes; Cloudinary max is 100MB. Clips will still be uploaded."
         )
-        await _upload(compressed_path)
-    finally:
-        if compressed_path.exists() and compressed_path != source_path:
-            compressed_path.unlink(missing_ok=True)
+        project.metadata = metadata
+        await project.save()
+        return
+
+    raw_upload = await cloudinary.upload_video(
+        str(source_path),
+        folder=f"projects/{project.id}/raw",
+    )
+    project.cloudinary_raw_url = raw_upload.get("secure_url") or raw_upload.get("url")
+    project.cloudinary_folder = f"projects/{project.id}/"
+    await project.save()
 
 
 def is_upload_project(project: Project) -> bool:

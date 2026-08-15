@@ -1,6 +1,6 @@
 "use client"
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import api, { isTransientNetworkError, wakeApiServer, withTransientRetry } from "@/lib/api"
 
@@ -98,43 +98,59 @@ export default function DashboardPage() {
   const [pendingNavAction, setPendingNavAction] = useState<string | null>(null)
   const [pickerSearch, setPickerSearch] = useState("")
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
+  const refreshInFlight = useRef(false)
 
   const loadProjects = useCallback(async () => {
     const response = await withTransientRetry(
       () => api.get("/api/v1/projects/", { timeout: 60000 }),
-      2,
+      3,
     )
     setProjects(Array.isArray(response.data) ? response.data : [])
+    setError(null)
   }, [])
 
-  useEffect(() => {
+  const refreshProjects = useCallback(async () => {
+    if (refreshInFlight.current) return
     const token = localStorage.getItem("token")
     if (!token) {
       router.push("/login")
       return
     }
-    wakeApiServer()
-    withTransientRetry(() => api.get("/api/v1/projects/", { timeout: 60000 }), 2)
-      .then((r) => {
-        setProjects(Array.isArray(r.data) ? r.data : [])
-        setError(null)
-      })
-      .catch((err: unknown) => {
-        const status = (err as { response?: { status?: number; data?: { detail?: string } } })?.response?.status
-        const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        if (status === 401 || status === 403) {
-          localStorage.removeItem("token")
-          router.push("/login")
-          return
-        }
-        if (isTransientNetworkError(err)) {
-          setError("Backend is waking up or unreachable. Wait a few seconds and refresh.")
-          return
-        }
-        setError(typeof detail === "string" && detail.trim() ? detail : "Could not load projects.")
-      })
-      .finally(() => setIsLoading(false))
-  }, [router])
+    refreshInFlight.current = true
+    setIsLoading(true)
+    try {
+      await wakeApiServer(90000)
+      await loadProjects()
+    } catch (err: unknown) {
+      const status = (err as { response?: { status?: number; data?: { detail?: string } } })?.response?.status
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      if (status === 401 || status === 403) {
+        localStorage.removeItem("token")
+        router.push("/login")
+        return
+      }
+      if (isTransientNetworkError(err)) {
+        setError("Backend is waking up or unreachable. Wait a few seconds and retry.")
+        return
+      }
+      setError(typeof detail === "string" && detail.trim() ? detail : "Could not load projects.")
+    } finally {
+      refreshInFlight.current = false
+      setIsLoading(false)
+    }
+  }, [loadProjects, router])
+
+  useEffect(() => {
+    void refreshProjects()
+  }, [refreshProjects])
+
+  useEffect(() => {
+    if (!error) return
+    const timer = window.setInterval(() => {
+      void refreshProjects()
+    }, 8000)
+    return () => window.clearInterval(timer)
+  }, [error, refreshProjects])
 
   useEffect(() => {
     const hasInProgress = projects.some((p) => {
@@ -436,9 +452,14 @@ export default function DashboardPage() {
           </div>
 
           {error && (
-            <div className="mb-4 flex items-center justify-between rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
+            <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3">
               <p className="text-sm text-red-400">{error}</p>
-              <button onClick={() => setError(null)} className="text-red-400/60 hover:text-red-400 text-lg leading-none">✕</button>
+              <button
+                onClick={() => void refreshProjects()}
+                className="flex-shrink-0 rounded-lg bg-red-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-600"
+              >
+                Retry
+              </button>
             </div>
           )}
 
@@ -452,6 +473,13 @@ export default function DashboardPage() {
                   <div className="h-3 w-1/3 rounded bg-white/[0.04]" />
                 </div>
               ))}
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-red-200 bg-white py-20 text-center">
+              <p className="text-sm font-medium text-red-500">Cannot reach the backend</p>
+              <p className="mt-1 max-w-md text-xs text-[#3a3d52]">
+                Your uploaded video is still in the database. Open Render, wait until the service is Live, then click Retry.
+              </p>
             </div>
           ) : projects.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200/70 bg-white py-20 text-center">
