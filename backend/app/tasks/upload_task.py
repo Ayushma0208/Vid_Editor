@@ -154,13 +154,11 @@ async def _generate_thumbnail(video_path: Path, output_path: Path) -> bool:
 
 
 async def _copy_or_transcode_mp4(ffmpeg_service: FfmpegService, source: Path, dest: Path) -> None:
+    """Copy the source into place. Never transcode the full file — that OOMs on Render free."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    ext = source.suffix.lower() or ".mp4"
-    if ext == ".mp4":
-        if source.resolve() != dest.resolve():
-            await asyncio.to_thread(shutil.copy2, source, dest)
+    if source.resolve() == dest.resolve():
         return
-    await ffmpeg_service.transcode_to_mp4(str(source), str(dest))
+    await asyncio.to_thread(shutil.copy2, source, dest)
 
 
 async def _ingest_quality_uploads(
@@ -168,11 +166,9 @@ async def _ingest_quality_uploads(
     project_dir: Path,
     source_paths: list[Path],
 ) -> tuple[dict, Path, float | None, str]:
-    """Probe each file, bucket by height (240/480/720/1080), write quality copies."""
+    """Copy uploads into the project dir and probe them. Never transcode the full file."""
     qualities_dir = project_dir / "qualities"
-    ingest_dir = project_dir / "ingest"
     qualities_dir.mkdir(parents=True, exist_ok=True)
-    ingest_dir.mkdir(parents=True, exist_ok=True)
 
     chosen: dict[str, dict] = {}
     duration: float | None = None
@@ -182,20 +178,18 @@ async def _ingest_quality_uploads(
     for index, source in enumerate(source_paths):
         if not source.is_file():
             continue
-        temp_mp4 = ingest_dir / f"file-{index}.mp4"
-        await _copy_or_transcode_mp4(ffmpeg_service, source, temp_mp4)
-        probed_duration = await ffmpeg_service.probe_duration(str(temp_mp4))
+        dest = qualities_dir / f"source-{index}{source.suffix.lower() or '.mp4'}"
+        await _copy_or_transcode_mp4(ffmpeg_service, source, dest)
+        probed_duration = await ffmpeg_service.probe_duration(str(dest))
         if probed_duration and (duration is None or probed_duration > duration):
             duration = probed_duration
-        dims = await ffmpeg_service.probe_dimensions(str(temp_mp4))
+        dims = await ffmpeg_service.probe_dimensions(str(dest))
         height = dims[1] if dims else None
         bucket = nearest_target_quality(height)
         target_height = int(bucket) if bucket.isdigit() else 0
         distance = abs((height or target_height) - target_height)
         previous = chosen.get(bucket)
         if previous is None or distance < int(previous["distance"]):
-            dest = qualities_dir / f"{bucket}.mp4"
-            await _copy_or_transcode_mp4(ffmpeg_service, temp_mp4, dest)
             chosen[bucket] = {
                 "path": dest,
                 "height": height or target_height,
@@ -204,16 +198,10 @@ async def _ingest_quality_uploads(
             }
         if (height or 0) > best_raw_height:
             best_raw_height = height or 0
-            best_raw = temp_mp4
+            best_raw = dest
 
-    dest_path = project_dir / "raw_video.mp4"
-    if best_raw is not None and best_raw.resolve() != dest_path.resolve():
-        await asyncio.to_thread(shutil.copy2, best_raw, dest_path)
-    elif best_raw is None:
-        for source in source_paths:
-            if source.is_file():
-                await _copy_or_transcode_mp4(ffmpeg_service, source, dest_path)
-                break
+    if best_raw is None:
+        raise FileNotFoundError("No readable video file in this upload")
 
     assets = init_quality_assets()
     for key in list(assets):
@@ -236,8 +224,7 @@ async def _ingest_quality_uploads(
             }
 
     primary_bucket = nearest_target_quality(best_raw_height if best_raw_height > 0 else None)
-    shutil.rmtree(ingest_dir, ignore_errors=True)
-    return assets, dest_path, duration, primary_bucket
+    return assets, best_raw, duration, primary_bucket
 
 
 async def _run_upload_pipeline(
